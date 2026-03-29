@@ -15,16 +15,24 @@ from __future__ import annotations
 import asyncio
 from celery import shared_task
 from loguru import logger
+from langgraph.types import Command
 
 from src.scheduler.celery_app import celery_app
 
 SEVEN_DAYS_SEC = 7 * 24 * 60 * 60   # 604800
 TWO_DAYS_SEC   = 2 * 24 * 60 * 60   # 172800
 
+from src.tools.platforms.linkedin import LinkedInClient
+
 
 def _run_async(coro):
     """Run an async coroutine from a sync Celery task."""
-    return asyncio.get_event_loop().run_until_complete(coro)
+    try:
+        loop = asyncio.get_event_loop()
+    except RuntimeError:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+    return loop.run_until_complete(coro)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -72,6 +80,35 @@ def wait_for_hr_selection(self, job_id: str, thread_id: str) -> dict:
 
 
 # ─────────────────────────────────────────────────────────────
+# Task 3: Real multi-platform publishing
+# ─────────────────────────────────────────────────────────────
+@celery_app.task(
+    name="tasks.publish_to_platforms",
+    bind=True,
+    max_retries=2,
+)
+def publish_to_platforms(self, job_id: str, job_title: str, jd_content: str) -> dict:
+    """
+    Asynchronously posts to LinkedIn.
+    """
+    logger.info("📢 [publish_to_platforms] Starting async post for job_id={}", job_id)
+    
+    results = {}
+    
+    # 1. LinkedIn
+    try:
+        li = LinkedInClient()
+        results["linkedin"] = li.publish_job(job_id, job_title, jd_content)
+    except Exception as e:
+        logger.error("❌ [Celery] LinkedIn failed: {}", e)
+        results["linkedin"] = f"ERROR: {e}"
+
+    logger.success("🏁 [publish_to_platforms] Finished job_id={}. Results: {}", job_id, results)
+    print(f"\n✅ [WORKER] LinkedIn Publishing completed for Job {job_id}. Check results above!\n")
+    return results
+
+
+# ─────────────────────────────────────────────────────────────
 # Shared: resume the LangGraph graph with a scheduler event
 # ─────────────────────────────────────────────────────────────
 async def _resume_graph_after_wait(job_id: str, thread_id: str, event: str) -> dict:
@@ -81,12 +118,16 @@ async def _resume_graph_after_wait(job_id: str, thread_id: str, event: str) -> d
     """
     from src.graph.pipeline import get_pipeline
 
-    pipeline = get_pipeline()
+    pipeline = await get_pipeline()
     config = {"configurable": {"thread_id": thread_id}}
 
-    # Resume the graph — the interrupt() in the wait node will receive `event`
+    # Resume the graph — the interrupt() in the wait node will receive the dict
     result = await pipeline.ainvoke(
-        {"scheduler_event": event, "job_id": job_id},
+        Command(resume={
+            "job_id": job_id,
+            "decision": "scheduler_event",
+            "event": event
+        }),
         config=config,
     )
     logger.success(

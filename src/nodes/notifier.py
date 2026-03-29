@@ -27,9 +27,11 @@ def send_final_decision(state: HiringState) -> dict:
 
     # ── Interrupt: HR provides { selected_ids: [...] } via API ───────────────
     hr_response: dict = interrupt({
-        "type":       "final_decision",
-        "message":    "Interviews completed. Provide final candidate decisions.",
-        "candidates": [{"id": c["candidate_id"], "name": c["name"]} for c in shortlist],
+        "type":            "final_decision",
+        "job_id":          state.get("job_id"),
+        "organization_id": state.get("organization_id"),
+        "message":         "Interviews completed. Provide final candidate decisions.",
+        "candidates":      [{"id": c["candidate_id"], "name": c["name"]} for c in shortlist],
     })
 
     selected_ids = set(hr_response.get("selected_ids", []))

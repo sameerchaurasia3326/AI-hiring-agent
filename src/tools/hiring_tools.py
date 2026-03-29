@@ -20,6 +20,7 @@ Tools defined here:
 """
 from __future__ import annotations
 
+import asyncio
 import smtplib
 import uuid
 from datetime import datetime, timezone, timedelta
@@ -39,21 +40,52 @@ from src.config import settings
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _smtp_send(to: str, subject: str, body: str, html: bool = False) -> str:
-    """Internal SMTP dispatch — not exposed as a tool directly."""
+    """Internal email dispatch — supports SMTP and SendGrid."""
+    
+    # ── Choice 1: Resend ────────────────────────────────────
+    if settings.email_backend == "resend":
+        try:
+            import resend
+            resend.api_key = settings.resend_api_key
+            
+            params = {
+                "from": settings.from_email,
+                "to": to,
+                "subject": subject,
+                "text": body if not html else None,
+                "html": body if html else None,
+            }
+            resend.Emails.send(params)
+            logger.success("🚀 [RESEND] Email sent → {}: {}", to, subject)
+            return f"Resend email sent to {to}"
+        except Exception as e:
+            logger.error("❌ Resend failed to {}: {}", to, e)
+            return f"ERROR: Resend failed: {e}"
+
+    # ── Choice 2: Console (for testing/dev) ─────────────────
+    if settings.email_backend == "console":
+        logger.warning("📺 [CONSOLE EMAIL] To: {} | Subject: {}", to, subject)
+        logger.info("\n---\n{}\n---", body)
+        return f"Email logged to console for {to}"
+
+    # ── Choice 3: Standard SMTP ──────────────────────────────
     msg = MIMEMultipart("alternative")
     msg["From"]    = settings.from_email
     msg["To"]      = to
     msg["Subject"] = subject
     msg.attach(MIMEText(body, "html" if html else "plain", "utf-8"))
 
-    with smtplib.SMTP(settings.smtp_host, settings.smtp_port) as srv:
-        srv.ehlo()
-        srv.starttls()
-        srv.login(settings.smtp_user, settings.smtp_password)
-        srv.sendmail(settings.from_email, [to], msg.as_string())
-
-    logger.success("📧 Email sent → {}: {}", to, subject)
-    return f"Email sent to {to}"
+    try:
+        with smtplib.SMTP(settings.smtp_host, settings.smtp_port) as srv:
+            srv.ehlo()
+            srv.starttls()
+            srv.login(settings.smtp_user, settings.smtp_password)
+            srv.sendmail(settings.from_email, [to], msg.as_string())
+        logger.success("📧 [SMTP] Email sent → {}: {}", to, subject)
+        return f"Email sent to {to}"
+    except Exception as e:
+        logger.error("❌ SMTP failed to {}: {}", to, e)
+        return f"ERROR: SMTP failed: {e}"
 
 
 @tool
@@ -124,6 +156,7 @@ def send_rejection_email_tool(
     candidate_email: str,
     candidate_name: str,
     job_title: str,
+    company_name: str = "Hiring Team",
 ) -> str:
     """Send a professional rejection email to a non-selected candidate.
 
@@ -131,22 +164,21 @@ def send_rejection_email_tool(
         candidate_email: Candidate's email address.
         candidate_name: Full name of the candidate.
         job_title: Role they applied for.
+        company_name: Name of the hiring company.
     Returns:
         Confirmation string.
     """
-    body = f"""Dear {candidate_name},
+    body = f"""Hi {candidate_name},
 
-Thank you sincerely for investing your time in our {job_title} interview process.
+Thank you for your interest in the {job_title} role.
 
-After thorough deliberation, we have decided to move forward with another candidate whose experience more closely aligns with our immediate needs.
+After careful consideration, we will not be moving forward with your application at this stage.
 
-We were genuinely impressed by your background and warmly encourage you to apply for future openings.
+We appreciate your time and effort and wish you success in your job search.
 
-Wishing you every success in your career journey.
-
-Kind regards,
-The Hiring Team"""
-    return _smtp_send(candidate_email, f"Application Update — {job_title}", body)
+Best regards,
+{company_name}"""
+    return _smtp_send(candidate_email, "Update on your application", body)
 
 
 @tool
@@ -168,104 +200,201 @@ def send_shortlist_email_tool(
     """
     import json
     candidates = json.loads(candidates_json)
-    rows = "\n".join(
-        f"  <tr><td>{i+1}</td><td>{c['name']}</td><td>{c['email']}</td>"
-        f"<td><b>{c['score']:.1f}/100</b></td></tr>"
-        for i, c in enumerate(candidates)
-    )
+    rows = ""
+    for c in candidates:
+        select_url = f"http://localhost:8000/jobs/{job_id}/select-candidates?selected_ids={c['candidate_id']}"
+        rows += f"""
+        <tr>
+          <td>{c['name']}</td>
+          <td>{c['email']}</td>
+          <td><b>{c['score']:.1f}/100</b></td>
+          <td><a href="{select_url}" style="background:#10b981; color:white; padding:5px 10px; text-decoration:none; border-radius:3px; font-weight:bold;">Select for Interview</a></td>
+        </tr>
+        """
+
     html = f"""
 <h2>🤖 AI Candidate Shortlist — {job_title}</h2>
-<p>The AI has ranked the top {len(candidates)} candidate(s). Please review and select who should proceed to interview.</p>
+<p>The AI has ranked the top {len(candidates)} candidate(s). Please click <b>'Select for Interview'</b> next to any candidate you wish to proceed with.</p>
 <table border="1" cellpadding="8" cellspacing="0">
-  <tr style="background:#f0f0f0"><th>#</th><th>Name</th><th>Email</th><th>AI Score</th></tr>
+  <tr style="background:#f0f0f0"><th>Name</th><th>Email</th><th>AI Score</th><th>Action</th></tr>
 {rows}
 </table>
 <br>
-<p><strong>⚡ Action Required (within 2 days):</strong><br>
-POST <code>/jobs/{job_id}/select-candidates</code> with the <code>candidate_ids</code> list to confirm your selections.</p>
+<p><i>Note: Selection links will expire in 2 days.</i></p>
 """
     return _smtp_send(hr_email, f"[Hiring AI] Shortlist Ready — {job_title}", html, html=True)
+
+
+def send_email(to: str, subject: str, body: str, html: bool = False) -> str:
+    """Public utility for sending emails across the system.
+    
+    This function is intended for internal use by nodes and API endpoints. 
+    For LLM tool calling, use send_email_tool.
+    """
+    return _smtp_send(to, subject, body, html)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # CALENDAR TOOLS
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _get_calendar_service():
-    """Internal: build authenticated Google Calendar service."""
-    import os
-    from google.oauth2.credentials import Credentials
-    from google.auth.transport.requests import Request
-    from google_auth_oauthlib.flow import InstalledAppFlow
+
+async def _get_calendar_service_async(email: str = None):
+    """Internal: build authenticated Google Calendar service.
+    
+    Priority:
+      1. User-specific OAuth service (if email matches a connected user)
+      2. Service Account (fallback for HR/System)
+      3. Mock (if both fail)
+    """
+    from src.db.database import AsyncSessionLocal
+    from src.db.models import User
+    from src.api.google_auth_utils import get_user_calendar_service
+    from sqlalchemy import select
+
+    if email:
+        async with AsyncSessionLocal() as session:
+            stmt = select(User).where(User.email == email)
+            user = (await session.execute(stmt)).scalar_one_or_none()
+            if user and user.google_refresh_token:
+                logger.info("📅 Using personal OAuth service for {}", email)
+                return await get_user_calendar_service(str(user.id), session)
+
+    # 2. Fallback to Service Account
+    from google.oauth2 import service_account
     from googleapiclient.discovery import build
 
     SCOPES = ["https://www.googleapis.com/auth/calendar"]
-    token_path = "./config/token.json"
-    creds = None
+    service_account_file = "service-account.json"
+    
+    if not Path(service_account_file).exists():
+        logger.warning("📅 Service account credentials missing at {}. Using MOCK calendar.", service_account_file)
+        return None
 
-    if Path(token_path).exists():
-        creds = Credentials.from_authorized_user_file(token_path, SCOPES)
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            flow = InstalledAppFlow.from_client_secrets_file(
-                settings.google_credentials_path, SCOPES
-            )
-            creds = flow.run_local_server(port=0)
-        with open(token_path, "w") as f:
-            f.write(creds.to_json())
-    return build("calendar", "v3", credentials=creds)
+    try:
+        # Running sync IO in thread
+        creds = await asyncio.to_thread(
+            service_account.Credentials.from_service_account_file,
+            service_account_file, 
+            scopes=SCOPES
+        )
+        return build("calendar", "v3", credentials=creds)
+    except Exception as e:
+        logger.error("📅 Failed to initialize Google Calendar service: {}", e)
+        return None
 
 
 @tool
-def find_calendar_slots_tool(days_ahead: int = 7, max_slots: int = 5) -> str:
-    """Find available interview slots on the HR's Google Calendar.
+async def find_calendar_slots_tool(
+    days_ahead: int = 7,
+    max_slots: int = 5,
+    interviewer_email: str = "",
+    duration_minutes: int = 60,
+) -> str:
+    """Find available interview slots by checking BOTH the interviewer's and HR's calendar.
+
+    Calls Google Calendar freebusy.query for both calendars, merges all busy
+    periods, then walks the next `days_ahead` days in `duration_minutes`
+    increments (Mon–Fri, 9am–5pm UTC) to find genuinely free slots.
 
     Args:
-        days_ahead: How many days ahead to search for free slots.
-        max_slots: Maximum number of slots to return.
+        days_ahead: How many days ahead to search.
+        max_slots: Maximum number of free slots to return.
+        interviewer_email: Email of the person conducting interviews (calendar to check).
+        duration_minutes: Length of each interview slot in minutes (default 60).
     Returns:
-        JSON string of available slots [{start, end}].
+        JSON string [{"start": ISO8601, "end": ISO8601}, ...]
     """
     import json
     try:
-        service = _get_calendar_service()
-        now     = datetime.now(timezone.utc)
-        end     = now + timedelta(days=days_ahead)
+        service = await _get_calendar_service_async(interviewer_email)
+        if not service:
+            now = datetime.now(timezone.utc).replace(hour=10, minute=0, second=0, microsecond=0)
+            mock_slots = [
+                {
+                    "start": (now + timedelta(days=i, hours=1)).isoformat(),
+                    "end":   (now + timedelta(days=i, hours=1, minutes=duration_minutes)).isoformat(),
+                }
+                for i in range(1, max_slots + 1)
+            ]
+            logger.info("📅 [MOCK CALENDAR] {} free slots (interviewer: {})", len(mock_slots), interviewer_email or "none")
+            return json.dumps(mock_slots)
 
-        busy = service.freebusy().query(body={
-            "timeMin": now.isoformat(), "timeMax": end.isoformat(),
-            "items": [{"id": settings.google_calendar_id}],
-        }).execute()["calendars"].get(settings.google_calendar_id, {}).get("busy", [])
+        now = datetime.now(timezone.utc)
+        end = now + timedelta(days=days_ahead)
 
-        slots, candidate = [], now.replace(hour=9, minute=0, second=0, microsecond=0) + timedelta(hours=1)
+        # ── Query freebusy for BOTH calendars ──────────────────────────────────
+        calendar_ids = [settings.google_calendar_id]
+        if interviewer_email and interviewer_email != settings.google_calendar_id:
+            calendar_ids.append(interviewer_email)
+
+        freebusy_result = await asyncio.to_thread(
+            service.freebusy().query(body={
+                "timeMin": now.isoformat(),
+                "timeMax": end.isoformat(),
+                "items":   [{"id": cal_id} for cal_id in calendar_ids],
+            }).execute
+        )
+
+        # Merge all busy periods from all queried calendars
+        busy_raw: list[dict] = []
+        for cal_id in calendar_ids:
+            cal_busy = freebusy_result["calendars"].get(cal_id, {}).get("busy", [])
+            busy_raw.extend(cal_busy)
+
+        # Parse to datetime for easier comparison
+        busy_parsed = [
+            (
+                datetime.fromisoformat(b["start"]),
+                datetime.fromisoformat(b["end"]),
+            )
+            for b in busy_raw
+        ]
+
+        # ── Walk time range to find free slots ─────────────────────────────────
+        delta       = timedelta(minutes=duration_minutes)
+        slots: list = []
+        candidate   = now.replace(hour=9, minute=0, second=0, microsecond=0) + timedelta(days=1)
+
         while len(slots) < max_slots and candidate < end:
-            if candidate.weekday() < 5 and 9 <= candidate.hour < 17:
-                slot_end = candidate + timedelta(hours=1)
-                if not any(
-                    candidate < datetime.fromisoformat(b["end"]) and
-                    slot_end > datetime.fromisoformat(b["start"])
-                    for b in busy
-                ):
-                    slots.append({"start": candidate.isoformat(), "end": slot_end.isoformat()})
+            slot_end = candidate + delta
+
+            # Only Mon–Fri, between 09:00 and 17:00 UTC
+            if candidate.weekday() < 5 and 9 <= candidate.hour < 17 and slot_end.hour <= 17:
+                is_busy = any(
+                    candidate < b_end and slot_end > b_start
+                    for b_start, b_end in busy_parsed
+                )
+                if not is_busy:
+                    slots.append({
+                        "start": candidate.isoformat(),
+                        "end":   slot_end.isoformat(),
+                    })
+
             candidate += timedelta(hours=1)
 
+        logger.info("📅 Found {} free slots for interviewer={}", len(slots), interviewer_email or "HR")
         return json.dumps(slots)
+
     except Exception as e:
         logger.error("find_calendar_slots_tool failed: {}", e)
         return json.dumps([])
 
 
+
 @tool
-def book_interview_tool(
+async def book_interview_tool(
     candidate_name: str,
     candidate_email: str,
     slot_start: str,
     slot_end: str,
     job_title: str,
+    interviewer_email: str = "",
 ) -> str:
-    """Book an interview calendar event and return the event ID.
+    """Book an interview calendar event with both the candidate and interviewer as attendees.
+
+    Creates a Google Calendar event with an auto-generated Google Meet link.
+    Both the candidate and interviewer receive calendar invites.
 
     Args:
         candidate_name: Full name of the candidate.
@@ -273,33 +402,68 @@ def book_interview_tool(
         slot_start: ISO 8601 start datetime string.
         slot_end: ISO 8601 end datetime string.
         job_title: Position being interviewed for.
+        interviewer_email: Email of the person conducting the interview.
     Returns:
-        Calendar event ID string, or 'ERROR:...' on failure.
+        JSON string {"event_id": str, "meet_link": str}, or '{"error": "..."}' on failure.
     """
+    import json
     try:
-        service = _get_calendar_service()
+        service = await _get_calendar_service_async(interviewer_email)
+        if not service:
+            mock_id   = f"mock-event-{uuid.uuid4().hex[:8]}"
+            mock_link = f"https://meet.google.com/mock-{uuid.uuid4().hex[:8]}"
+            logger.warning(
+                "📅 [MOCK CALENDAR] Booked interview for {} at {} | ID: {} | Meet: {}",
+                candidate_name, slot_start, mock_id, mock_link,
+            )
+            return json.dumps({"event_id": mock_id, "meet_link": mock_link})
+
+        # Build attendees list — always include candidate; add interviewer if provided
+        attendees = [{"email": candidate_email}]
+        if interviewer_email:
+            attendees.append({"email": interviewer_email})
+
         event = {
-            "summary": f"Interview: {candidate_name} — {job_title}",
-            "description": f"AI-scheduled interview for the {job_title} position.",
-            "start": {"dateTime": slot_start, "timeZone": "UTC"},
-            "end":   {"dateTime": slot_end,   "timeZone": "UTC"},
-            "attendees": [{"email": candidate_email}],
+            "summary":     f"Interview: {candidate_name} — {job_title}",
+            "description": (
+                f"AI-scheduled interview for the {job_title} position.\n\n"
+                f"Candidate: {candidate_name} ({candidate_email})\n"
+                f"Interviewer: {interviewer_email or 'TBD'}"
+            ),
+            "start":     {"dateTime": slot_start, "timeZone": "UTC"},
+            "end":       {"dateTime": slot_end,   "timeZone": "UTC"},
+            "attendees": attendees,
             "conferenceData": {
-                "createRequest": {"requestId": f"hire-{uuid.uuid4().hex[:8]}"}
+                "createRequest": {
+                    "requestId":             f"hire-{uuid.uuid4().hex[:8]}",
+                    "conferenceSolutionKey": {"type": "hangoutsMeet"},
+                }
             },
             "reminders": {"useDefault": True},
         }
-        created = service.events().insert(
-            calendarId=settings.google_calendar_id,
-            body=event,
-            conferenceDataVersion=1,
-            sendUpdates="all",
-        ).execute()
-        logger.success("📅 Booked: {} at {}", candidate_name, slot_start)
-        return created["id"]
+
+        created = await asyncio.to_thread(
+            service.events().insert(
+                calendarId=settings.google_calendar_id,
+                body=event,
+                conferenceDataVersion=1,   # required for Meet link generation
+                sendUpdates="all",         # sends invites to all attendees
+            ).execute
+        )
+
+        meet_link = created.get("hangoutLink", "")
+        event_id  = created["id"]
+
+        logger.success(
+            "📅 Booked: {} at {} | Meet: {} | Interviewer: {}",
+            candidate_name, slot_start, meet_link, interviewer_email or "N/A",
+        )
+        return json.dumps({"event_id": event_id, "meet_link": meet_link})
+
     except Exception as e:
         logger.error("book_interview_tool failed: {}", e)
-        return f"ERROR:{e}"
+        return json.dumps({"event_id": f"ERROR:{e}", "meet_link": ""})
+
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -329,6 +493,11 @@ def parse_resume_tool(resume_path: str) -> str:
             return "\n".join(para.text for para in Document(str(p)).paragraphs)[:6000]
         except Exception as e:
             return f"ERROR: DOCX parse failed: {e}"
+    elif p.suffix.lower() == ".txt":
+        try:
+            return p.read_text(encoding="utf-8")[:6000]
+        except Exception as e:
+            return f"ERROR: TXT parse failed: {e}"
     return "ERROR: Unsupported file type"
 
 

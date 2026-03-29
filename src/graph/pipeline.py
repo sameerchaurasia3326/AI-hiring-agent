@@ -29,7 +29,7 @@ Graph nodes:
 from __future__ import annotations
 
 from langgraph.graph import StateGraph, START, END
-from langgraph.checkpoint.postgres import PostgresSaver
+from langgraph.checkpoint.postgres.aio import AsyncPostgresSaver
 
 from src.state.schema import HiringState, PipelineStatus
 from src.config import settings
@@ -44,6 +44,7 @@ from src.nodes.resume_scorer        import score_resumes
 from src.nodes.shortlist_sender     import send_shortlist_to_hr
 from src.nodes.interview_scheduler  import schedule_interviews
 from src.nodes.notifier             import send_final_decision
+from src.nodes.test_generator       import generate_tests
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -230,6 +231,7 @@ def build_pipeline() -> StateGraph:
     # ── Register nodes ─────────────────────────────────────────────────────────
     graph.add_node("init_state",           init_state)
     graph.add_node("generate_jd",          generate_jd)
+    graph.add_node("generate_tests",       generate_tests)
     graph.add_node("review_jd",            review_jd)
     graph.add_node("publish_jd",           publish_jd)
     graph.add_node("collect_applications", collect_applications)
@@ -244,8 +246,11 @@ def build_pipeline() -> StateGraph:
     graph.add_edge(START,           "init_state")
     graph.add_edge("init_state",    "generate_jd")
 
-    # generate_jd always goes to review_jd
-    graph.add_edge("generate_jd",  "review_jd")
+    # generate_jd flows to generate_tests
+    graph.add_edge("generate_jd",    "generate_tests")
+
+    # generate_tests always goes to review_jd
+    graph.add_edge("generate_tests",  "review_jd")
 
     # Decision 1: JD Approved?
     graph.add_conditional_edges(
@@ -325,17 +330,29 @@ def build_pipeline() -> StateGraph:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 _pipeline_instance = None
+_saver_cm = None
 
-
-def get_pipeline():
+async def get_pipeline():
     """
-    Return the compiled LangGraph pipeline with Postgres checkpointer.
+    Return the compiled LangGraph pipeline with async Postgres checkpointer.
     Singleton — created once per process.
     """
-    global _pipeline_instance
+    global _pipeline_instance, _saver_cm
     if _pipeline_instance is None:
-        graph    = build_pipeline()
-        checkpointer = PostgresSaver.from_conn_string(settings.database_url_sync)
-        checkpointer.setup()   # creates checkpointer tables if absent
-        _pipeline_instance = graph.compile(checkpointer=checkpointer, interrupt_before=[])
+        graph = build_pipeline()
+
+        # AsyncPostgresSaver needs a psycopg-compatible connection string
+        # (psycopg doesn't like the +asyncpg dialect prefix)
+        pg_url = settings.database_url.replace("postgresql+asyncpg://", "postgresql://")
+        _saver_cm = AsyncPostgresSaver.from_conn_string(pg_url)
+        checkpointer = await _saver_cm.__aenter__()
+
+        # Create checkpointer tables if they don't exist
+        await checkpointer.setup()
+
+        _pipeline_instance = graph.compile(
+            checkpointer=checkpointer,
+            interrupt_before=[],
+        )
+
     return _pipeline_instance

@@ -30,6 +30,8 @@ def review_jd(state: HiringState) -> dict:
 
     hr_response: dict = interrupt({
         "type":           "jd_review",
+        "job_id":         state.get("job_id"),
+        "organization_id": state.get("organization_id"),
         "jd_draft":       state.get("jd_draft", ""),
         "revision_count": revision,
         "message":        "Approve JD or provide feedback for revision.",
