@@ -24,7 +24,7 @@ class Settings(BaseSettings):
     # ── Embeddings ────────────────────────────────────────────────────────────
     embedding_provider: str = "openai"
     openai_embedding_model: str = "text-embedding-3-small"
-    gemini_embedding_model: str = "models/embedding-001"
+    gemini_embedding_model: str = "models/text-embedding-004"
     openrouter_embedding_model: str = "openai/text-embedding-3-small"
     embedding_dimension: int = 1536
 
@@ -45,7 +45,7 @@ class Settings(BaseSettings):
     email_backend: str = "smtp"
     smtp_host: str = "smtp.gmail.com"
     smtp_port: int = 587
-    smtp_user: str = ""
+    smtp_email: str = ""
     smtp_password: str = ""
     resend_api_key: str = ""
     hr_email: str = ""
@@ -59,7 +59,9 @@ class Settings(BaseSettings):
     google_redirect_uri: str = "http://localhost:8000/auth/google/callback"
 
     # ── Pipeline Thresholds ───────────────────────────────────────────────────
+    max_running_jobs: int = 10
     max_jd_revisions: int = 5
+
     max_repost_attempts: int = 3
     shortlist_top_n: int = 5
     resume_score_threshold: float = 20.0
@@ -70,10 +72,15 @@ class Settings(BaseSettings):
     api_port: int = 8000
     frontend_url: str = "http://localhost:5173"
     secret_key: str = "change-me-in-production"
+    encryption_key: str = "P8EwV1oJ1zJc1YVw8QvqMWe_z2UuR4g0I7sC_P9o2Xo="  # Default fernet key for dev
 
     # ── Job Platforms ─────────────────────────────────────────────────────────
+    linkedin_fallback_enabled: bool = True
     linkedin_access_token: str = "your_linkedin_access_token"
     linkedin_company_urn:  str = ""
+    linkedin_client_id: str = ""
+    linkedin_client_secret: str = ""
+    linkedin_redirect_uri: str = "http://localhost:8000/auth/linkedin/callback"
 
 
 settings = Settings()

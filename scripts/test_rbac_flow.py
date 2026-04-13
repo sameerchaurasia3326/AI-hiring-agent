@@ -74,8 +74,8 @@ async def test_full_rbac_flow():
             "technical_test_type": None,
             "technical_test_mcq": [],
             "hiring_workflow": [
-                {"stage_name": "resume_screening", "assigned_user_id": None},
-                {"stage_name": "technical_interview", "assigned_user_id": interviewer_id}
+                {"stage_name": "resume_screening", "interviewer_id": None},
+                {"stage_name": "technical_interview", "interviewer_id": interviewer_id}
             ],
             "scoring_weights": {"semantic_similarity": 25, "llm_evaluation": 75, "screening_score": 0, "test_score": 0}
         }
@@ -100,7 +100,7 @@ async def test_full_rbac_flow():
         app_id = str(uuid.uuid4())
         # assign technical_interview user directly to the application
         await conn.execute('''
-            INSERT INTO applications (id, job_id, candidate_id, assigned_user_id, hr_selected)
+            INSERT INTO applications (id, job_id, candidate_id, interviewer_id, hr_selected)
             VALUES ($1, $2, $3, $4, false)
         ''', app_id, job_id, cand_id, interviewer_id)
         print("✅ Candidate fully assigned in DB")

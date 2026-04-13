@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { useNavigate, Link } from 'react-router-dom';
+import { Link } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Loader2, Eye, EyeOff, Sun, Moon } from 'lucide-react';
 import { api } from '../services/api';
@@ -32,7 +32,13 @@ export default function Signup() {
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(false);
-  const navigate = useNavigate();
+  
+  // OTP States
+  const [showOtpModal, setShowOtpModal] = useState(false);
+  const [otp, setOtp] = useState('');
+  const [countdown, setCountdown] = useState(0);
+  const [resendLoading, setResendLoading] = useState(false);
+
 
   const [isDark, setIsDark] = useState(() => {
     const saved = localStorage.getItem('theme');
@@ -45,6 +51,14 @@ export default function Signup() {
     else { document.documentElement.classList.remove('dark'); localStorage.setItem('theme', 'light'); }
   }, [isDark]);
 
+  useEffect(() => {
+    let timer: any;
+    if (countdown > 0 && showOtpModal) {
+      timer = setTimeout(() => setCountdown(countdown - 1), 1000);
+    }
+    return () => clearTimeout(timer);
+  }, [countdown, showOtpModal]);
+
   const handleSignup = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
@@ -56,11 +70,48 @@ export default function Signup() {
         password: formData.password,
         company_name: formData.company_name
       });
-      navigate('/login');
+      setShowOtpModal(true);
+      setCountdown(60);
     } catch (err: any) {
       setError(err.response?.data?.detail || 'Registration failed.');
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleVerifyOtp = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (otp.length !== 6) return;
+    setLoading(true);
+    setError('');
+    
+    try {
+      const res = await api.verifyEmail({ email: formData.email, otp });
+      localStorage.setItem('hiring_ai_token', res.access_token);
+      localStorage.setItem('hiring_ai_email', formData.email);
+      if (res.role) {
+        localStorage.setItem('hiring_ai_role', res.role);
+      }
+      window.location.href = res.role === 'admin' ? '/dashboard' : '/dashboard/my-tasks';
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Invalid OTP');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleResendOtp = async () => {
+    if (countdown > 0) return;
+    setResendLoading(true);
+    setError('');
+    try {
+      await api.resendOtp({ email: formData.email });
+      setCountdown(60);
+      setError('A fresh OTP has been sent to your email.');
+    } catch (err: any) {
+      setError(err.response?.data?.detail || 'Failed to resend OTP');
+    } finally {
+      setResendLoading(false);
     }
   };
 
@@ -99,44 +150,77 @@ export default function Signup() {
                 </div>
               )}
 
-              <form className="space-y-[1.15rem]" onSubmit={handleSignup}>
-                <div>
-                  <label className="block text-[11px] text-slate-500 dark:text-slate-400 mb-1.5 ml-4 font-medium">Company name</label>
-                  <input required placeholder="Acme Corp" value={formData.company_name} onChange={e => setFormData({...formData, company_name: e.target.value})} className="w-full px-6 py-[0.85rem] rounded-[2rem] bg-white dark:bg-slate-800/80 border-none shadow-sm text-[13px] placeholder:text-slate-300 dark:placeholder:text-slate-500 outline-none focus:ring-2 focus:ring-[#FACC15] transition-all text-slate-700 dark:text-white" />
-                </div>
-                
-                <div>
-                  <label className="block text-[11px] text-slate-500 dark:text-slate-400 mb-1.5 ml-4 font-medium">Email</label>
-                  <input required type="email" placeholder="amelia@company.com" value={formData.email} onChange={e => setFormData({...formData, email: e.target.value})} className="w-full px-6 py-[0.85rem] rounded-[2rem] bg-white dark:bg-slate-800/80 border-none shadow-sm text-[13px] placeholder:text-slate-300 dark:placeholder:text-slate-500 outline-none focus:ring-2 focus:ring-[#FACC15] transition-all text-slate-700 dark:text-white" />
-                </div>
+              {showOtpModal ? (
+                <div className="w-full flex flex-col items-center mt-6 animate-fade-in">
+                  <div className="w-16 h-16 bg-blue-50 dark:bg-blue-500/10 rounded-full flex items-center justify-center mb-6">
+                    <svg className="w-8 h-8 text-blue-600 dark:text-blue-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+                    </svg>
+                  </div>
+                  <h2 className="text-xl font-bold text-slate-800 dark:text-white mb-2">Check your email</h2>
+                  <p className="text-sm text-slate-500 dark:text-slate-400 text-center mb-8">
+                    We've sent a 6-digit verification code to<br/>
+                    <strong className="text-slate-700 dark:text-slate-300">{formData.email}</strong>
+                  </p>
+                  
+                  <form onSubmit={handleVerifyOtp} className="w-full flex flex-col items-center">
+                    <input autoFocus required maxLength={6} type="text" placeholder="123456" className="w-[200px] text-center text-2xl tracking-[0.5em] font-mono px-4 py-3 rounded-2xl bg-white dark:bg-slate-800/80 border border-slate-200 dark:border-white/10 shadow-sm outline-none focus:ring-2 focus:ring-[#FACC15] transition-all text-slate-700 dark:text-white mb-8" value={otp} onChange={e => setOtp(e.target.value.replace(/\D/g, ''))} />
+                    
+                    <button type="submit" disabled={loading || otp.length !== 6} className="w-full py-[0.85rem] rounded-[2rem] bg-[#FACC15] hover:bg-[#EAB308] disabled:bg-[#fde047] disabled:cursor-not-allowed shadow-[0_4px_14px_0_rgba(250,204,21,0.39)] text-slate-900 text-[13px] font-medium transition-all flex items-center justify-center">
+                      {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Verify Code'}
+                    </button>
+                  </form>
 
-                <div className="relative">
-                  <label className="block text-[11px] text-slate-500 dark:text-slate-400 mb-1.5 ml-4 font-medium">Password</label>
-                  <div className="relative">
-                    <input required type={showPassword ? "text" : "password"} placeholder="••••••••••••••••" value={formData.password} onChange={e => setFormData({...formData, password: e.target.value})} className="w-full pl-6 pr-12 py-[0.85rem] rounded-[2rem] bg-white dark:bg-slate-800/80 border-none shadow-sm text-[13px] placeholder:text-slate-300 dark:placeholder:text-slate-500 outline-none focus:ring-2 focus:ring-[#FACC15] transition-all text-slate-700 dark:text-white" />
-                    <button type="button" onClick={() => setShowPassword(!showPassword)} className="absolute right-4 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-600 dark:hover:text-white transition-colors">
-                      {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  <div className="mt-8 text-center">
+                    <p className="text-xs text-slate-500 dark:text-slate-400 mb-2">Didn't receive the email?</p>
+                    <button onClick={handleResendOtp} disabled={countdown > 0 || resendLoading} className="text-[13px] font-semibold text-slate-700 dark:text-slate-300 hover:text-blue-600 disabled:opacity-50 transition-colors flex items-center justify-center mx-auto gap-2">
+                      {resendLoading && <Loader2 className="w-3 h-3 animate-spin" />}
+                      {countdown > 0 ? `Resend code in ${countdown}s` : 'Resend code'}
                     </button>
                   </div>
+                  
+                  <button onClick={() => {setShowOtpModal(false); setOtp('');}} className="mt-8 text-xs text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 flex items-center gap-1 transition-colors">
+                    ← Back to signup
+                  </button>
                 </div>
-                
-                <button type="submit" disabled={loading} className="w-full mt-8 py-[0.85rem] rounded-[2rem] bg-[#FACC15] hover:bg-[#EAB308] disabled:bg-[#fde047] disabled:cursor-not-allowed shadow-[0_4px_14px_0_rgba(250,204,21,0.39)] text-slate-900 text-[13px] font-medium transition-all flex items-center justify-center mt-6">
-                  {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Submit'}
-                </button>
+              ) : (
+                <form className="space-y-[1.15rem]" onSubmit={handleSignup}>
+                  <div>
+                    <label className="block text-[11px] text-slate-500 dark:text-slate-400 mb-1.5 ml-4 font-medium">Company name</label>
+                    <input required placeholder="Acme Corp" value={formData.company_name} onChange={e => setFormData({...formData, company_name: e.target.value})} className="w-full px-6 py-[0.85rem] rounded-[2rem] bg-white dark:bg-slate-800/80 border-none shadow-sm text-[13px] placeholder:text-slate-300 dark:placeholder:text-slate-500 outline-none focus:ring-2 focus:ring-[#FACC15] transition-all text-slate-700 dark:text-white" />
+                  </div>
+                  
+                  <div>
+                    <label className="block text-[11px] text-slate-500 dark:text-slate-400 mb-1.5 ml-4 font-medium">Email</label>
+                    <input required type="email" placeholder="amelia@company.com" value={formData.email} onChange={e => setFormData({...formData, email: e.target.value})} className="w-full px-6 py-[0.85rem] rounded-[2rem] bg-white dark:bg-slate-800/80 border-none shadow-sm text-[13px] placeholder:text-slate-300 dark:placeholder:text-slate-500 outline-none focus:ring-2 focus:ring-[#FACC15] transition-all text-slate-700 dark:text-white" />
+                  </div>
 
-                <div className="flex gap-4 mt-4">
-                  <button type="button" className="flex-1 flex items-center justify-center gap-2 py-[0.65rem] rounded-[2rem] border border-slate-300/80 dark:border-white/10 bg-transparent text-[11px] font-semibold text-slate-700 dark:text-slate-300 hover:bg-white/50 dark:hover:bg-slate-800/50 transition-colors shadow-sm">
-                    {/* Apple Icon SVG */}
-                    <svg viewBox="0 0 384 512" className="w-[14px] h-[14px] fill-current text-slate-800 dark:text-white"><path d="M318.7 268.7c-.2-36.7 16.4-64.4 50-84.8-18.8-26.9-47.2-41.7-84.7-44.6-35.5-2.8-74.3 20.7-88.5 20.7-15 0-49.4-19.7-76.4-19.7C63.3 141.2 4 184.8 4 273.5q0 39.3 14.4 81.2c12.8 36.7 59 126.7 107.2 125.2 25.2-.6 43-17.9 75.8-17.9 31.8 0 48.3 17.9 76.4 17.9 48.6-.7 90.4-82.5 102.6-119.3-65.2-30.7-61.7-90-61.7-91.9zm-56.6-164.2c27.3-32.4 24.8-61.9 24-72.5-24.1 1.4-52 16.4-67.9 34.9-17.5 19.8-27.8 44.3-25.6 71.9 26.1 2 49.9-11.4 69.5-34.3z"/></svg> 
-                    Apple
+                  <div className="relative">
+                    <label className="block text-[11px] text-slate-500 dark:text-slate-400 mb-1.5 ml-4 font-medium">Password</label>
+                    <div className="relative">
+                      <input required type={showPassword ? "text" : "password"} placeholder="••••••••••••••••" value={formData.password} onChange={e => setFormData({...formData, password: e.target.value})} className="w-full pl-6 pr-12 py-[0.85rem] rounded-[2rem] bg-white dark:bg-slate-800/80 border-none shadow-sm text-[13px] placeholder:text-slate-300 dark:placeholder:text-slate-500 outline-none focus:ring-2 focus:ring-[#FACC15] transition-all text-slate-700 dark:text-white" />
+                      <button type="button" onClick={() => setShowPassword(!showPassword)} className="absolute right-4 top-1/2 -translate-y-1/2 p-1 text-slate-400 hover:text-slate-600 dark:hover:text-white transition-colors">
+                        {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                      </button>
+                    </div>
+                  </div>
+                  
+                  <button type="submit" disabled={loading} className="w-full mt-8 py-[0.85rem] rounded-[2rem] bg-[#FACC15] hover:bg-[#EAB308] disabled:bg-[#fde047] disabled:cursor-not-allowed shadow-[0_4px_14px_0_rgba(250,204,21,0.39)] text-slate-900 text-[13px] font-medium transition-all flex items-center justify-center mt-6">
+                    {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : 'Submit'}
                   </button>
-                  <button type="button" className="flex-1 flex items-center justify-center gap-2 py-[0.65rem] rounded-[2rem] border border-slate-300/80 dark:border-white/10 bg-transparent text-[11px] font-semibold text-slate-700 dark:text-slate-300 hover:bg-white/50 dark:hover:bg-slate-800/50 transition-colors shadow-sm">
-                     {/* Google Icon SVG */}
-                    <svg viewBox="0 0 24 24" className="w-[14px] h-[14px]"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
-                    Google
-                  </button>
-                </div>
-              </form>
+
+                  <div className="flex gap-4 mt-4">
+                    <button type="button" className="flex-1 flex items-center justify-center gap-2 py-[0.65rem] rounded-[2rem] border border-slate-300/80 dark:border-white/10 bg-transparent text-[11px] font-semibold text-slate-700 dark:text-slate-300 hover:bg-white/50 dark:hover:bg-slate-800/50 transition-colors shadow-sm">
+                      <svg viewBox="0 0 384 512" className="w-[14px] h-[14px] fill-current text-slate-800 dark:text-white"><path d="M318.7 268.7c-.2-36.7 16.4-64.4 50-84.8-18.8-26.9-47.2-41.7-84.7-44.6-35.5-2.8-74.3 20.7-88.5 20.7-15 0-49.4-19.7-76.4-19.7C63.3 141.2 4 184.8 4 273.5q0 39.3 14.4 81.2c12.8 36.7 59 126.7 107.2 125.2 25.2-.6 43-17.9 75.8-17.9 31.8 0 48.3 17.9 76.4 17.9 48.6-.7 90.4-82.5 102.6-119.3-65.2-30.7-61.7-90-61.7-91.9zm-56.6-164.2c27.3-32.4 24.8-61.9 24-72.5-24.1 1.4-52 16.4-67.9 34.9-17.5 19.8-27.8 44.3-25.6 71.9 26.1 2 49.9-11.4 69.5-34.3z"/></svg> 
+                      Apple
+                    </button>
+                    <button type="button" className="flex-1 flex items-center justify-center gap-2 py-[0.65rem] rounded-[2rem] border border-slate-300/80 dark:border-white/10 bg-transparent text-[11px] font-semibold text-slate-700 dark:text-slate-300 hover:bg-white/50 dark:hover:bg-slate-800/50 transition-colors shadow-sm">
+                      <svg viewBox="0 0 24 24" className="w-[14px] h-[14px]"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
+                      Google
+                    </button>
+                  </div>
+                </form>
+              )}
             </div>
           </div>
 

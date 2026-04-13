@@ -3,140 +3,105 @@ src/nodes/jd_generator.py
 ──────────────────────────
 LangGraph Node: generate_jd
 ────────────────────────────
-Pure node — takes state, calls LLM, returns state delta.
-NO if/else routing — that lives entirely in conditional edges on the graph.
-State transition: → JD_DRAFT
+Production Hardened:
+1. Atomic Lease Guard (Phase 1).
+2. Jittery Retries for LLM (Phase 7).
+3. Structured Observability (Phase 8 & 14).
 """
 from __future__ import annotations
 
-from langchain_core.prompts import ChatPromptTemplate
+import json
 from loguru import logger
-from sqlalchemy import update
+from langchain_core.prompts import ChatPromptTemplate
+from datetime import datetime, timezone
 
-from src.db.database import AsyncSessionLocal
-from src.db.models import Job
 from src.state.schema import HiringState, PipelineStatus
+from src.config.jd_templates import JD_TEMPLATES
 from src.tools.llm_factory import get_llm
-from src.tools.hiring_tools import send_hr_notification_tool
-
-_SYSTEM = """You are a senior technical recruiter at a world-class technology company.
-Write a professional, inclusive, and compelling Job Description that will attract the best talent.
-
-Structure:
-1. Company Overview (3-4 sentences)
-2. Role Summary (3-4 sentences)
-3. Key Responsibilities (6-8 bullet points)
-4. Required Qualifications (5-7 bullet points)
-5. Nice-to-Have Qualifications (3-5 bullet points)
-6. What We Offer / Benefits
-7. How to Apply
-
-Rules:
-- STRICT LIMIT: The entire Job Description MUST NOT exceed 2800 characters, otherwise it will fail to post to LinkedIn. Keep it concise.
-- No gender-biased or exclusionary language
-- Be specific about the tech stack and tools
-- Include the salary range if provided"""
-
-_HUMAN = """
-Job Title: {job_title}
-Department: {department}
-Location: {location}
-Employment Type: {employment_type}
-Experience Required: {experience_required}
-Salary Range: {salary_range}
-Required Skills: {required_skills}
-Preferred Skills: {preferred_skills}
-Joining Requirement: {joining_requirement}
-{feedback_block}
-Write the complete Job Description.
-"""
-
-_FEEDBACK_BLOCK = """
-⚠️ REVISION #{count} — HR Feedback to address:
-{feedback}
-"""
+from src.utils.activity import log_activity_sync
+from src.utils.production_safety import StructuredLogger, db_timeout, safe_tool_call, log_event, lease_guard, llm_semaphore
+from src.utils.normalization import normalize_job_role
+from src.state.validator import validate_node
 
 
+@validate_node
+@lease_guard
 async def generate_jd(state: HiringState) -> dict:
-    """Generate JD draft using LLM node."""
-    logger.info("⚡ [generate_jd] Node triggered! Initializing AI drafting process...")
-    revision = state.get("jd_revision_count", 0)
-    feedback = state.get("hr_feedback", "")
-
-    feedback_block = (
-        _FEEDBACK_BLOCK.format(count=revision, feedback=feedback)
-        if revision > 0 and feedback else ""
-    )
-
-    logger.info("🖊  [generate_jd] revision #{}", revision)
-    logger.debug("📌 [generate_jd] Received state: {}", {k: v for k, v in state.items() if k != "jd_draft"})
-
-    chain = ChatPromptTemplate.from_messages([
-        ("system", _SYSTEM), ("human", _HUMAN)
-    ]) | get_llm(temperature=0.5)
-
-    response = chain.invoke({
-        "job_title":           state.get("job_title", ""),
-        "department":          state.get("department", ""),
-        "location":            state.get("location", ""),
-        "employment_type":     state.get("employment_type", ""),
-        "experience_required": state.get("experience_required", ""),
-        "salary_range":        state.get("salary_range", "Competitive"),
-        "required_skills":     ", ".join(state.get("required_skills", [])),
-        "preferred_skills":    ", ".join(state.get("preferred_skills", [])),
-        "joining_requirement": state.get("joining_requirement", ""),
-        "feedback_block":      feedback_block,
-    })
-
-    # ── Database Sync: Save JD draft to Postgres immediately ────────────────
+    """
+    Pure node — takes state, calls LLM, returns state delta.
+    Uses Phase 7 Jittery Retries and Phase 5 Global Semaphores.
+    """
     job_id = state.get("job_id")
-    async with AsyncSessionLocal() as session:
-        try:
+    trace_id = state.get("trace_id")
+    s_logger = StructuredLogger(trace_id=trace_id, job_id=job_id)
+
+    if not job_id:
+        return state
+
+    job_title = state.get("job_title", "Software Engineer")
+    requirements = state.get("raw_requirements", "Build great products.")
+    
+    await log_event(job_id, "JD_GENERATION_STARTED")
+
+    from src.tools.llm_factory import get_llm
+    llm = get_llm(temperature=0.7)
+
+    system_prompt = JD_TEMPLATES.get("standard_system", "You are an expert HR recruiter.")
+    user_prompt = JD_TEMPLATES.get("generation_prompt", "Generate a JD for {title} given {req}")
+    
+    prompt = ChatPromptTemplate.from_messages([
+        ("system", system_prompt),
+        ("human", user_prompt)
+    ])
+
+    # Phase 4, 5, 7 & 10: Resilience Layer
+    try:
+        from src.utils.resilience import with_resilience
+        
+        async with llm_semaphore:
+            response = await with_resilience(
+                "ollama",
+                llm.ainvoke,
+                max_retries=3,
+                input=prompt.format(title=job_title, req=requirements),
+                config={"callbacks": []}
+            )
+        jd_text = response.content
+
+
+        s_logger.success("JD_GENERATION_COMPLETED")
+        await log_event(job_id, "JD_GENERATION_SUCCESS")
+
+        # ── [NEW] Phase 15 & Fix: Sync AI state to Relational DB for UI Visibility ──
+        from src.db.database import AsyncSessionLocal
+        from src.db.models import Job, PipelineState
+        from sqlalchemy import update
+        
+        logger.info("JD_GENERATED_SUCCESSFULLY", extra={"job_id": job_id})
+    
+        # ── [NEW] Role-Awareness: Recalibrate Context after generation ──
+        from src.db.database import AsyncSessionLocal
+        from src.db.models import Job
+        from sqlalchemy import update
+        
+        new_role = await normalize_job_role(job_title)
+        
+        async with AsyncSessionLocal() as session:
             await session.execute(
-                update(Job)
-                .where(Job.id == job_id)
-                .values(
-                    jd_draft=response.content,
-                    pipeline_state=PipelineStatus.JD_APPROVAL_PENDING.value,
-                    jd_revision_count=revision
-                )
+                update(Job).where(Job.id == job_id).values(normalized_role=new_role, jd_draft=jd_text, pipeline_state=PipelineState.JD_APPROVAL_PENDING)
             )
             await session.commit()
-            logger.info("💾 [generate_jd] Persisted JD draft to database for job_id={}", job_id)
-        except Exception as e:
-            logger.error("❌ [generate_jd] Database sync failed: {}", e)
 
-    # ── Notification: Send JD to HR for review ────────────────────────────────
-    logger.info("📧 Sending JD review notification to HR...")
-    send_hr_notification_tool.invoke({
-        "hr_email": state.get("hiring_manager_email"),
-        "subject": f"[Hiring AI] Review Required: {state.get('job_title')}",
-        "html_body": f"""
-        <h2>📄 Job Description Draft Ready</h2>
-        <p>The AI has generated a JD for the <strong>{state.get('job_title')}</strong> role ({state.get('department')}).</p>
-        <p><strong>Job ID:</strong> <code>{job_id}</code></p>
-        <hr>
-        <pre style="white-space: pre-wrap; font-family: sans-serif; background: #f4f4f4; padding: 10px; border-radius: 5px;">{response.content}</pre>
-        <hr>
-        <h3>⚡ Action Required (Human-in-the-Loop)</h3>
-        <p>The recruitment pipeline is currently <strong>paused</strong> waiting for your decision.</p>
-        
-        <p><strong>Option 1: Quick Actions (Click to approve immediately)</strong></p>
-        <div style="margin-top: 10px;">
-            <a href="{settings.frontend_url}/jobs/{job_id}/approve?approved=true" 
-               style="background: #10b981; color: white; padding: 10px 20px; text-decoration: none; border-radius: 5px; font-weight: bold; margin-right: 10px;">
-               ✅ Approve & Publish
-            </a>
-        </div>
+        return {
+            "jd_draft": jd_text,
+            "job_title": job_title,
+            "normalized_role": new_role,
+            "pipeline_status": PipelineStatus.JD_APPROVAL_PENDING.value,
+            "current_stage": "review_jd",
+            "action_type": "jd_generation_complete"
+        }
 
-        <p style="margin-top: 20px;"><strong>Review JD on Dashboard</strong></p>
-        <p>Alternatively, visit your dashboard to review and edit the draft.</p>
-        <a href="{settings.frontend_url}/dashboard" style="color: #3b82f6; font-weight: bold;">Go to Dashboard →</a>
-        """
-    })
-
-    return {
-        "jd_draft":        response.content,
-        "jd_approved":     False,
-        "pipeline_status": PipelineStatus.JD_DRAFT.value,
-    }
+    except Exception as e:
+        s_logger.error("JD_GENERATION_FAILED", str(e))
+        await log_event(job_id, "JD_GENERATION_FAILED", {"error": str(e)})
+        return {"pipeline_status": PipelineStatus.FAILED.value}

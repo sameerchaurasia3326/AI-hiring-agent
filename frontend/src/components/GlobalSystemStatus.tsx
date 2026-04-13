@@ -9,15 +9,15 @@ export default function GlobalSystemStatus() {
       try {
         const jobs = await api.getJobs();
         // Check if any job is in a processing state
-        const activeStates = ['JD_DRAFT', 'WAITING_FOR_APPLICATIONS', 'SCREENING', 'JD_APPROVAL_PENDING', 'HR_REVIEW_PENDING', 'processing'];
-        const isProcessing = jobs.some((j: any) => activeStates.includes(j.status));
+        const activeStates = ['JD_DRAFT', 'WAITING_FOR_APPLICATIONS', 'SCREENING', 'processing'];
+        const isProcessing = jobs.some((j: any) => j.status === 'processing' || activeStates.includes(j.pipeline_state));
         setStatus(isProcessing ? 'processing' : 'idle');
       } catch (e) {
         setStatus('error');
       }
     };
     checkStatus();
-    const interval = setInterval(checkStatus, 5000);
+    const interval = setInterval(checkStatus, 30000); // Poll every 30s (was 5s — too aggressive)
     return () => clearInterval(interval);
   }, []);
 

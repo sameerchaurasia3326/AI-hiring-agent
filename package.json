@@ -1,0 +1,23 @@
+{
+  "name": "hiring.ai",
+  "version": "1.0.0",
+  "description": "> An enterprise-grade, end-to-end AI recruitment system. It orchestrates your entire hiring pipeline — from generating job descriptions to scheduling interviews — using a stateful LangGraph agent with human-in-the-loop controls.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/sameerchaurasia3326/AI-hiring-agent.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/sameerchaurasia3326/AI-hiring-agent/issues"
+  },
+  "homepage": "https://github.com/sameerchaurasia3326/AI-hiring-agent#readme",
+  "devDependencies": {
+    "get-shit-done-cc": "^1.34.2"
+  }
+}
