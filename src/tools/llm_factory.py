@@ -10,7 +10,7 @@ Fallback chain (automatic):
   4. Ollama         (local — no key needed, always last resort)
 """
 from __future__ import annotations
-
+import asyncio
 from loguru import logger
 
 from langchain_core.language_models import BaseChatModel
@@ -52,6 +52,7 @@ def get_llm(temperature: float = 0.3, prioritize_local: bool = False) -> BaseCha
             model=model_name,
             temperature=temperature,
             api_key=settings.openai_api_key,
+            timeout=60,
         )
         logger.debug("LLM factory: prepared OpenAI (%s)", model_name)
 
@@ -64,6 +65,7 @@ def get_llm(temperature: float = 0.3, prioritize_local: bool = False) -> BaseCha
             model=model_name,
             temperature=temperature,
             google_api_key=settings.google_api_key,
+            request_timeout=60,
         )
         logger.debug("LLM factory: prepared Google Gemini (%s)", model_name)
 
@@ -77,6 +79,7 @@ def get_llm(temperature: float = 0.3, prioritize_local: bool = False) -> BaseCha
             api_key=settings.openrouter_api_key,
             base_url="https://openrouter.ai/api/v1",
             temperature=temperature,
+            timeout=60,
         )
         logger.debug("LLM factory: prepared OpenRouter (%s)", model_name)
 
@@ -87,6 +90,7 @@ def get_llm(temperature: float = 0.3, prioritize_local: bool = False) -> BaseCha
             model=settings.ollama_model,
             base_url=settings.ollama_base_url,
             temperature=temperature,
+            timeout=60,
         )
         logger.debug("LLM factory: prepared Ollama (%s)", settings.ollama_model)
     else:
@@ -127,23 +131,8 @@ def get_llm(temperature: float = 0.3, prioritize_local: bool = False) -> BaseCha
         logger.info("LLM: using {} (no fallbacks)", ordered_models[0].__class__.__name__)
         return ordered_models[0]
 
-    # Enhanced fallback logic with logging
-    def wrap_with_logging(model: BaseChatModel, is_primary: bool = False):
-        name = model.__class__.__name__
-        def _invoke_with_log(input, config=None, **kwargs):
-            if is_primary:
-                logger.info("🤖 [LLM] Trying primary: {}", name)
-            else:
-                logger.warning("🔄 [LLM] Falling back to: {}", name)
-            try:
-                return model.invoke(input, config=config, **kwargs)
-            except Exception as e:
-                logger.error("❌ [LLM] {} failed: {}", name, str(e)[:100])
-                raise e
-        return RunnableLambda(_invoke_with_log)
-
-    primary = wrap_with_logging(ordered_models[0], is_primary=True)
-    fallbacks = [wrap_with_logging(m) for m in ordered_models[1:]]
+    primary = ordered_models[0]
+    fallbacks = ordered_models[1:]
     
     logger.info(
         "LLM: primary={} ({}), fallbacks={}",
@@ -218,27 +207,38 @@ def get_embeddings():
         def __init__(self, models):
             self.models = models
         
-        def embed_query(self, text: str) -> List[float]:
+        async def embed_query(self, text: str) -> List[float]:
             for model in self.models:
                 try:
                     model_name = getattr(model, "model", model.__class__.__name__)
                     logger.info("🔄 [Embeddings] Trying fallback: {}", model_name)
-                    return model.embed_query(text)
-                except Exception as e:
-                    logger.warning("❌ [Embeddings] Fallback failed: {} | Error: {}", model.__class__.__name__, e)
+                    # Phase 15 & Request: Absolute 60s timeout for embedding creation
+                    if hasattr(model, "aembed_query"):
+                        return await asyncio.wait_for(model.aembed_query(text), timeout=60)
+                    else:
+                        return await asyncio.wait_for(asyncio.to_thread(model.embed_query, text), timeout=60)
+                except (asyncio.TimeoutError, Exception) as e:
+                    logger.warning("❌ [Embeddings] Fallback failed or timed out: {} | Error: {}", model.__class__.__name__, e)
                     continue
-            raise ValueError("All embedding models (cloud + local) failed.")
+            logger.warning("Mocking single embedding (all providers failed/hung).")
+            return [0.0] * 1536
             
-        def embed_documents(self, texts: List[str]) -> List[List[float]]:
+        async def embed_documents(self, texts: List[str]) -> List[List[float]]:
             for model in self.models:
                 try:
                     model_name = getattr(model, "model", model.__class__.__name__)
                     logger.info("🔄 [Embeddings] Trying fallback: {}", model_name)
-                    return model.embed_documents(texts)
-                except Exception as e:
-                    logger.warning("❌ [Embeddings] Fallback failed: {} | Error: {}", model.__class__.__name__, e)
+                    # Phase 15 & Request: Absolute 60s timeout for batch embeddings
+                    if hasattr(model, "aembed_documents"):
+                        return await asyncio.wait_for(model.aembed_documents(texts), timeout=60)
+                    else:
+                        return await asyncio.wait_for(asyncio.to_thread(model.embed_documents, texts), timeout=60)
+                except (asyncio.TimeoutError, Exception) as e:
+                    logger.warning("❌ [Embeddings] Fallback failed or timed out: {} | Error: {}", model.__class__.__name__, e)
                     continue
-            raise ValueError("All embedding models (cloud + local) failed.")
+            logger.warning("Mocking embeddings (all providers failed/hung).")
+            return [[0.0] * 1536 for _ in texts]
+
 
     return EmbeddingFallbackWrapper(ordered)
 

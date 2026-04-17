@@ -16,9 +16,11 @@ from datetime import datetime, timezone
 
 from sqlalchemy import (
     BigInteger, Boolean, Column, DateTime, Enum, Float,
-    ForeignKey, Integer, String, Text, JSON, text, UniqueConstraint
+    ForeignKey, Integer, String, Text, JSON, text, UniqueConstraint,
+    FetchedValue
 )
-from sqlalchemy.dialects.postgresql import UUID
+
+from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
 
 from src.db.database import Base
@@ -43,6 +45,29 @@ class PipelineState(str, enum.Enum):
 
 
 # ─────────────────────────────────────────────────────────────
+# Circuit Breaker Status Enum (Step 2: Distributed Resilience)
+# ─────────────────────────────────────────────────────────────
+class CircuitBreakerStatus(str, enum.Enum):
+    CLOSED    = "CLOSED"     # Normal operation
+    OPEN      = "OPEN"       # Failing, blocking requests
+    HALF_OPEN = "HALF_OPEN"  # Testing recovery with single probe
+
+
+class CircuitBreakerState(Base):
+    __tablename__ = "circuit_breaker_states"
+
+    service_name         = Column(String(100), primary_key=True)  # e.g., 'ollama', 'openai', 'resend'
+    status               = Column(Enum(CircuitBreakerStatus, native_enum=False, length=50), default=CircuitBreakerStatus.CLOSED, server_default="CLOSED")
+    last_failure_at      = Column(DateTime(timezone=True))
+    probe_started_at     = Column(DateTime(timezone=True))
+    consecutive_failures = Column(Integer, default=0, server_default="0")
+    error_message        = Column(Text)
+
+    updated_at           = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), server_default=text("now()"))
+
+
+
+# ─────────────────────────────────────────────────────────────
 # Organization Model (SaaS Multi-Tenancy)
 # ─────────────────────────────────────────────────────────────
 class Organization(Base):
@@ -53,22 +78,33 @@ class Organization(Base):
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow, server_default=text("now()"))
     
     users = relationship("User", back_populates="organization", cascade="all, delete-orphan")
+    integrations = relationship("Integration", back_populates="organization", cascade="all, delete-orphan")
     # In Step 2, Jobs will be linked here
 
 
 # ─────────────────────────────────────────────────────────────
 # User Model (SaaS Multi-Tenancy)
 # ─────────────────────────────────────────────────────────────
+class UserRole(str, enum.Enum):
+    admin = "admin"
+    interviewer = "interviewer"
+
 class User(Base):
     __tablename__ = "users"
 
     id = Column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
     email = Column(Text, unique=True, nullable=False)
-    password = Column(Text)
+    hashed_password = Column(Text)
     name = Column(Text)
     organization_id = Column(UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False)
-    role = Column(Text, default="admin", server_default="admin")
+    role = Column(Enum(UserRole, native_enum=False, length=50), default=UserRole.admin, server_default="admin")
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow, server_default=text("now()"))
+
+    # Email Verification
+    is_email_verified = Column(Boolean, default=False, server_default='false', index=True)
+    email_verification_otp_hash = Column(Text, nullable=True)
+    email_verification_expires = Column(DateTime(timezone=True), nullable=True)
+    email_verification_attempts = Column(Integer, default=0, server_default='0')
 
     # Google OAuth (Step 1)
     google_access_token = Column(Text, nullable=True)
@@ -76,8 +112,9 @@ class User(Base):
     google_token_expiry = Column(DateTime(timezone=True), nullable=True)
 
     organization = relationship("Organization", back_populates="users")
-    assigned_stages = relationship("JobStage", back_populates="assigned_user")
+    interviewer_stages = relationship("JobStage", back_populates="interviewer")
     feedback = relationship("InterviewFeedback", back_populates="interviewer")
+    interviews = relationship("Interview", back_populates="interviewer")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -96,6 +133,31 @@ class Invite(Base):
     created_at      = Column(DateTime(timezone=True), default=datetime.utcnow, server_default=text("now()"))
 
     organization = relationship("Organization")
+
+
+# ─────────────────────────────────────────────────────────────
+# Integration Model (External Providers)
+# ─────────────────────────────────────────────────────────────
+class Integration(Base):
+    __tablename__ = "integrations"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    organization_id = Column(UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False, index=True)
+    provider = Column(String(100), nullable=False)
+    access_token = Column(Text, nullable=False)
+    refresh_token = Column(Text, nullable=True)
+    expires_at = Column(DateTime(timezone=True), nullable=True)
+    status = Column(String(50), default="active", server_default="active")
+    provider_metadata = Column("metadata", JSONB, nullable=True)
+    
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), server_default=text("now()"))
+    updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc), server_default=text("now()"))
+
+    organization = relationship("Organization", back_populates="integrations")
+
+    __table_args__ = (
+        UniqueConstraint('organization_id', 'provider', name='uq_integration_org_provider'),
+    )
 
 
 # ─────────────────────────────────────────────────────────────
@@ -128,14 +190,18 @@ class Job(Base):
     technical_test_mcq   = Column(JSON)          # list[dict]
     hiring_workflow      = Column(JSON)          # list[str]
     scoring_weights      = Column(JSON)          # dict (semantic, llm, screening, test)
+    template_type        = Column(String(50), default="startup", server_default="startup")  # JD style: startup | corporate | fresher
 
     # Generated / pipeline fields
-    jd_draft             = Column(Text)          # current JD draft
+    jd_draft             = Column(Text)          # legacy / full json draft
+    summary              = Column(Text)          # 2-layer: short preview card text
+    full_jd              = Column(Text)          # 2-layer: full formatted string
     jd_revision_count    = Column(Integer, default=0)
     jd_approved          = Column(Boolean, default=False)
     hr_feedback          = Column(Text)
     published_jd_url     = Column(String(500))
     repost_attempts      = Column(Integer, default=0)
+    external_post_id     = Column(Text, nullable=True)
 
     # LangGraph thread_id (used to resume graph)
     graph_thread_id      = Column(String(100), unique=True)
@@ -147,7 +213,19 @@ class Job(Base):
         nullable=False,
         index=True,
     )
+    status_field = Column("status", String(50), default="PROCESSING") # ACTION_REQUIRED | PROCESSING | INTERVIEW_SCHEDULED | PAUSED
+    interrupt_payload = Column(JSONB, nullable=True) # Frozen state for Human-in-the-loop recovery
+    current_stage = Column(String(100))        # e.g., 'shortlisting', 'interview_scheduling'
     is_cancelled = Column(Boolean, default=False, server_default="false")  # HR cancelled pipeline mid-flow
+
+    # ── [NEW] Production Hardening (Lease + Versioning) ───────
+    locked_by        = Column(UUID(as_uuid=True), index=True) # Worker ID (process UUID)
+    locked_at        = Column(DateTime(timezone=True))
+    pipeline_version = Column(String(50), default="1.0.0", server_default="1.0.0")
+    last_email_version = Column(Integer, default=1, server_default="1")
+    normalized_role = Column(String(100), index=True)
+    scoring_blueprint = Column(JSON, nullable=True) # AI-generated evaluation profile (must-have, good-to-have)
+
 
     # Timestamps
     created_at     = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
@@ -194,11 +272,17 @@ class JobStage(Base):
     job_id           = Column(UUID(as_uuid=True), ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False, index=True)
     stage_name       = Column(Text, nullable=False)
     stage_order      = Column(Integer, nullable=False, default=0)
-    assigned_user_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    # Role-based access: specific interviewer for this stage
+    interviewer_id = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    
+    # ── [NEW] Custom Instructions ──────────────────────────────
+    stage_instructions = Column(Text, nullable=True) # AI hints for the interviewer
+    
     created_at       = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), server_default=text("now()"))
 
+    # Relationships
     job           = relationship("Job", back_populates="stages")
-    assigned_user = relationship("User", back_populates="assigned_stages")
+    interviewer   = relationship("User", back_populates="interviewer_stages")
     feedback      = relationship("InterviewFeedback", back_populates="stage")
 
 class ScreeningQuestion(Base):
@@ -271,19 +355,44 @@ class Candidate(Base):
     name        = Column(String(255), nullable=False)
     email       = Column(String(255), nullable=False, unique=True, index=True)
     phone       = Column(String(50))
+    resume_url  = Column(String(500))
+    skills      = Column(JSON)          # list[str]
+    experience  = Column(Text)
     linkedin_url = Column(String(500))
 
     created_at  = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
-    current_stage_id = Column(UUID(as_uuid=True), ForeignKey("job_stages.id", ondelete="SET NULL"), nullable=True)
-    status           = Column(String(50), default="processing", server_default="processing")
-
-    rejection_email_sent = Column(Boolean, default=False, server_default="false")
-    rejected_at          = Column(DateTime(timezone=True), nullable=True)
-
     applications = relationship("Application", back_populates="candidate")
-    current_stage = relationship("JobStage")
     feedback      = relationship("InterviewFeedback", back_populates="candidate")
+    interviews    = relationship("Interview", back_populates="candidate")
+
+# ─────────────────────────────────────────────────────────────
+# Interview Model (Scheduled Events)
+# ─────────────────────────────────────────────────────────────
+class Interview(Base):
+    __tablename__ = "interviews"
+
+    id              = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    organization_id = Column(UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=False)
+    candidate_id    = Column(UUID(as_uuid=True), ForeignKey("candidates.id", ondelete="CASCADE"), nullable=False)
+    application_id  = Column(UUID(as_uuid=True), ForeignKey("applications.id", ondelete="CASCADE"), nullable=True)
+    interviewer_id  = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    
+    scheduled_time  = Column(DateTime(timezone=True), nullable=False)
+    meeting_link    = Column(String(500))
+    status          = Column(String(50), default="scheduled", server_default="scheduled") # scheduled | completed
+    
+    # post-interview feedback (Step 3 refinement)
+    feedback_rating = Column(Integer)
+    feedback_notes  = Column(Text)
+    decision        = Column(String(50)) # hire | strong_hire | reject
+    
+    created_at      = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), server_default=text("now()"))
+
+    candidate   = relationship("Candidate", back_populates="interviews")
+    application = relationship("Application")
+    interviewer = relationship("User", back_populates="interviews")
+    organization = relationship("Organization")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -299,30 +408,47 @@ class Application(Base):
     resume_path  = Column(String(500))           # local path or S3 URL
     applied_at   = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
 
-    # LLM scoring results
-    ai_score         = Column(Float)             # 0-100
+    # Scoring & Stage
+    score            = Column(Float)             # 0-100
+    stage            = Column(String(50))        # screening | shortlisted | interviewed | rejected
     ai_reasoning     = Column(Text)
     ai_strengths     = Column(JSON)              # list[str]
     ai_gaps          = Column(JSON)              # list[str]
     is_shortlisted   = Column(Boolean, default=False)
+    source           = Column(String(50), default="ai", server_default="ai") # ai | manual | referral
     hr_selected      = Column(Boolean)           # None = pending, True/False = HR decision
+    is_scored        = Column(Boolean, default=False, server_default="false") # Avoid re-processing
+    summary          = Column(Text)              # llm generated summary
+    evaluated_at     = Column(DateTime(timezone=True)) # When the LLM actually scored it
+    updated_at       = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
 
-    # Interview scheduling
+    # ── [NEW] RBAC & Scheduling ─────────────────────────────────
+    organization_id      = Column(UUID(as_uuid=True), ForeignKey("organizations.id", ondelete="CASCADE"), nullable=True) # Direct tenant link (Step 2 optimization)
     interview_slot       = Column(DateTime(timezone=True))
     calendar_event_id    = Column(String(255))
     meeting_link         = Column(String(500))   # Google Meet URL
     interviewer_email    = Column(String(255))   # who conducts the interview
-    assigned_user_id     = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)  # RBAC: interviewer assigned
+    interviewer_id       = Column(UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True)  # RBAC: interviewer assigned
     invite_sent          = Column(Boolean, default=False)
+    offer_sent           = Column(Boolean, default=False)
+    feedback_submitted   = Column(Boolean, default=False)
+    rejected             = Column(Boolean, default=False)
+    rejection_sent       = Column(Boolean, default=False)
+    rejected_at          = Column(DateTime(timezone=True))
+    current_stage_id     = Column(UUID(as_uuid=True), ForeignKey("job_stages.id", ondelete="SET NULL"), nullable=True)
 
-    # Final decision
-    offer_sent       = Column(Boolean, default=False)
-    rejected         = Column(Boolean, default=False)
-    rejection_sent   = Column(Boolean, default=False)
+    # ── [NEW] Evaluation Fields ─────────────────────────────────
+    interviewer_score    = Column(Float)
+    interviewer_notes    = Column(Text)
 
     # Relations
     job       = relationship("Job", back_populates="applications")
     candidate = relationship("Candidate", back_populates="applications")
+    current_stage = relationship("JobStage")
+
+    __table_args__ = (
+        UniqueConstraint('job_id', 'candidate_id', name='uq_job_candidate_application'),
+    )
 
 # ─────────────────────────────────────────────────────────────
 # Activity Log Model
@@ -367,3 +493,60 @@ class InterviewFeedback(Base):
     __table_args__ = (
         UniqueConstraint('candidate_id', 'stage_id', 'interviewer_id', name='uq_candidate_stage_interviewer'),
     )
+
+
+# ─────────────────────────────────────────────────────────────
+# Production Hardening Models (Source of Truth)
+# ─────────────────────────────────────────────────────────────
+
+class EventStore(Base):
+    """
+    Step 1 & 4: Distributed event store for pipeline reconstruction.
+    """
+    __tablename__ = "event_store"
+
+    id         = Column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    job_id     = Column(UUID(as_uuid=True), ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False, index=True)
+    event_type = Column(Text, nullable=False) # e.g. 'JD_GENERATED', 'SCORING_STARTED'
+    payload    = Column(JSONB, default={}, server_default='{}')
+    sequence   = Column(BigInteger, server_default=FetchedValue())
+    created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), server_default=text("now()"), index=True)
+
+
+
+class Outbox(Base):
+    """
+    Step 2: Guaranteed email dispatching pattern.
+    """
+    __tablename__ = "outbox"
+
+    id              = Column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    job_id          = Column(UUID(as_uuid=True), ForeignKey("jobs.id", ondelete="CASCADE"), nullable=False, index=True)
+    type            = Column(Text, nullable=False) # e.g. 'SEND_SHORTLIST'
+    payload         = Column(JSONB, nullable=False)
+    status          = Column(Text, default="PENDING", server_default="PENDING", index=True) # PENDING | SENT | FAILED
+    retry_count     = Column(Integer, default=0, server_default="0")
+    last_attempt_at = Column(DateTime(timezone=True))
+    version         = Column(Integer, default=1, server_default="1")
+    created_at      = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), server_default=text("now()"))
+
+    __table_args__ = (
+        UniqueConstraint("job_id", "type", "version", name="unique_job_event_version"),
+    )
+
+
+
+class DeadLetterQueue(Base):
+    """
+    Step 3: Permanent failure tracking for debugging.
+    """
+    __tablename__ = "dead_letter_queue"
+
+    id          = Column(UUID(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    job_id      = Column(UUID(as_uuid=True), ForeignKey("jobs.id", ondelete="CASCADE"), index=True)
+    type        = Column(Text) # e.g. 'SEND_SHORTLIST' (Phase 15: Critical for replay)
+    payload     = Column(JSONB, nullable=False)
+    reason      = Column(Text)
+    retry_count = Column(Integer)
+
+    failed_at   = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), server_default=text("now()"))

@@ -1,28 +1,27 @@
 import { useNavigate, useLocation } from 'react-router-dom';
 import { LayoutDashboard, Users, LogOut, Briefcase, Calendar, Users2, Settings, BarChart3, CheckSquare } from 'lucide-react';
+import { useUser } from '../context/UserContext';
 
 export default function Sidebar() {
   const navigate = useNavigate();
   const location = useLocation();
+  const { user, logout } = useUser();
 
   const handleLogout = () => {
-    localStorage.removeItem('hiring_ai_token');
-    localStorage.removeItem('hiring_ai_role');
-    localStorage.removeItem('hiring_ai_name');
-    navigate('/login');
+    logout();
   };
 
-  const role = localStorage.getItem('hiring_ai_role');
+  const role = user?.role;
 
   const navItems = [
     { name: 'Dashboard', icon: <LayoutDashboard className="w-5 h-5 mr-3" />, path: '/dashboard', roles: ['admin'] },
     { name: 'My Tasks', icon: <CheckSquare className="w-5 h-5 mr-3" />, path: '/dashboard/my-tasks', roles: ['admin', 'interviewer', 'hiring_manager'] },
     { name: 'Jobs', icon: <Briefcase className="w-5 h-5 mr-3" />, path: '/dashboard/jobs', roles: ['admin'] },
     { name: 'Candidates', icon: <Users className="w-5 h-5 mr-3" />, path: '/dashboard/candidates', roles: ['admin'] },
-    { name: 'Interviews', icon: <Calendar className="w-5 h-5 mr-3" />, path: '/dashboard/interviews', roles: ['admin'] },
-    { name: 'Team', icon: <Users2 className="w-5 h-5 mr-3" />, path: '/dashboard/team', roles: ['admin'] },
-    { name: 'Analytics', icon: <BarChart3 className="w-5 h-5 mr-3" />, path: '/dashboard/analytics', roles: ['admin'] },
-    { name: 'Settings', icon: <Settings className="w-5 h-5 mr-3" />, path: '/dashboard/settings', roles: ['admin'] },
+    { name: 'Interviews', icon: <Calendar className="w-5 h-5 mr-3" />, path: '/dashboard/interviews', roles: ['admin', 'interviewer', 'hiring_manager'] },
+    { name: 'Team', icon: <Users2 className="w-5 h-5 mr-3" />, path: '/dashboard/team', roles: ['admin', 'interviewer', 'hiring_manager'] },
+    { name: 'Analytics', icon: <BarChart3 className="w-5 h-5 mr-3" />, path: '/dashboard/analytics', roles: ['admin', 'interviewer', 'hiring_manager'] },
+    { name: 'Settings', icon: <Settings className="w-5 h-5 mr-3" />, path: '/dashboard/settings', roles: ['admin', 'interviewer', 'hiring_manager'] },
   ];
 
   const filteredItems = navItems.filter(item => !item.roles || item.roles.includes(role || ''));

@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Hiring AI — Interviewer Dashboard</title>
+  <link rel="stylesheet" href="dashboard.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎯</text></svg>">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Sidebar -->
+    <aside>
+      <div class="logo" style="display: flex; align-items: center; gap: 0.8rem; margin-bottom: 2.5rem;">
+        <div style="background: var(--accent); width: 32px; height: 32px; border-radius: 8px; display: grid; place-items: center; color: white; font-weight: bold;">H</div>
+        <h2 style="font-size: 1.15rem; font-weight: 700; letter-spacing: -0.02em;">Hiring.AI</h2>
+      </div>
+      
+      <nav style="flex: 1;">
+        <ul style="list-style: none;">
+          <li style="margin-bottom: 0.5rem;"><a href="#" class="btn" style="width: 100%; justify-content: flex-start; background: rgba(255,255,255,0.05);">Dashboard</a></li>
+          <li style="margin-bottom: 0.5rem;"><a href="#" class="btn" style="width: 100%; justify-content: flex-start; color: var(--text-secondary);">Jobs</a></li>
+          <li style="margin-bottom: 0.5rem;"><a href="#" class="btn" style="width: 100%; justify-content: flex-start; color: var(--text-secondary);">Interviews</a></li>
+        </ul>
+      </nav>
+
+      <div class="user-profile" style="padding-top: 1rem; border-top: 1px solid var(--border); display: flex; align-items: center; gap: 0.8rem;">
+        <div id="user-avatar" style="width: 36px; height: 36px; border-radius: 99px; background: #334155; display: grid; place-items: center; font-size: 0.8rem;">JD</div>
+        <div style="flex: 1; overflow: hidden;">
+          <p id="user-name" style="font-size: 0.85rem; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">Loading...</p>
+          <p id="user-role" style="font-size: 0.7rem; color: var(--text-secondary); text-transform: capitalize;">Interviewer</p>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main Content -->
+    <main>
+      <header style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 2.5rem;">
+        <div>
+          <h1 style="font-size: 1.75rem; font-weight: 700;">Talent Pool</h1>
+          <p style="color: var(--text-secondary); font-size: 0.9rem;">Manage manually sourced and AI-detected candidates.</p>
+        </div>
+        <button id="btn-add-candidate" class="btn btn-primary">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+          Add Candidate
+        </button>
+      </header>
+
+      <!-- Candidate Table View -->
+      <section class="card">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem;">
+          <h3 style="font-size: 1rem;">Candidates</h3>
+          <div style="font-size: 0.75rem; color: var(--text-secondary);">Showing All Records</div>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>Status</th>
+              <th>Source</th>
+              <th>Applied Date</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="candidate-list-body">
+            <tr><td colspan="5" style="text-align: center; color: var(--text-secondary); padding: 3rem;">Loading candidates...</td></tr>
+          </tbody>
+        </table>
+      </section>
+    </main>
+  </div>
+
+  <!-- Add Candidate Modal -->
+  <div id="modal-add-candidate" class="modal-overlay">
+    <div class="modal-content card">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 2rem;">
+        <h2 style="font-size: 1.25rem;">Add New Candidate</h2>
+        <button id="btn-close-modal" style="background: none; border: none; color: var(--text-secondary); cursor: pointer;"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg></button>
+      </div>
+
+      <form id="form-add-candidate">
+        <div class="input-group">
+          <label>Full Name</label>
+          <input type="text" id="cand-name" placeholder="e.g. John Doe" required>
+        </div>
+        <div class="input-group">
+          <label>Email Address</label>
+          <input type="email" id="cand-email" placeholder="john@example.com" required>
+        </div>
+        <div class="input-group">
+          <label>Resume URL</label>
+          <input type="url" id="cand-resume" placeholder="https://linkedin.com/in/johndoe or PDF link" required>
+        </div>
+        <div class="input-group">
+          <label>Target Job</label>
+          <select id="cand-job-id" required>
+            <option value="">Select an active job...</option>
+          </select>
+        </div>
+        
+        <div style="display: flex; gap: 1rem; margin-top: 2rem;">
+          <button type="button" class="btn" style="flex: 1; border: 1px solid var(--border);" id="btn-cancel-modal">Cancel</button>
+          <button type="submit" class="btn btn-primary" style="flex: 1;" id="btn-submit-candidate">Add Candidate</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Toast Container -->
+  <div id="toast-container"></div>
+
+  <script src="dashboard.js"></script>
+</body>
+</html>

@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { motion } from 'framer-motion';
 import { Briefcase, ChevronRight, AlertCircle, Play, Sparkles, ArrowRight, Plus } from 'lucide-react';
 import { api } from '../services/api';
+import { useUser } from '../context/UserContext';
 import HeroSection from '../components/HeroSection';
 import StatsGrid from '../components/StatsGrid';
 import ActionCenter from '../components/ActionCenter';
@@ -22,26 +23,29 @@ interface Job {
   applicants_count: number;
   shortlist_count: number;
   interviews_count?: number;
+  company?: string;
+  location?: string;
+  job_type?: string;
+  salary?: string;
+  summary?: string;
+  template_type?: string;
 }
 
 export default function Dashboard() {
   const navigate = useNavigate();
+  const { user } = useUser();
   const [jobs, setJobs] = useState<Job[]>([]);
   const [loading, setLoading] = useState(true);
   const [fetchError, setFetchError] = useState(false);
 
-  const role = localStorage.getItem('hiring_ai_role');
-  const userName = localStorage.getItem('hiring_ai_name') || 'Admin';
-
+  // Simplified Role Redirection using Context
   useEffect(() => {
-    if (role === 'interviewer') {
-      navigate('/my-tasks');
+    if (user?.role === 'interviewer') {
+      navigate('/dashboard/my-tasks', { replace: true });
     }
-  }, [role, navigate]);
+  }, [user, navigate]);
 
-
-
-
+  const userName = user?.name || 'Admin';
 
   const fetchJobs = async (silent = false) => {
     try {
@@ -115,7 +119,6 @@ export default function Dashboard() {
 
   const heroContext = getHeroContext();
 
-
   if (fetchError && jobs.length === 0) {
     return (
       <div className="h-screen w-full flex items-center justify-center bg-gray-50">
@@ -132,7 +135,6 @@ export default function Dashboard() {
   return (
     <>
       <div className="max-w-7xl mx-auto">
-
           {/* Action-Driven Hero */}
           <motion.div
             initial={{ opacity: 0, y: -16 }}
@@ -294,11 +296,6 @@ export default function Dashboard() {
                 };
                 const statusInfo = statusMap[job.status] ?? { label: job.status, classes: 'bg-gray-100 text-gray-600 border-gray-200' };
 
-                // Human-readable created date
-                const createdLabel = job.created_at
-                  ? new Date(job.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
-                  : 'Unknown date';
-
                 return (
                   <motion.div
                     initial={{ opacity: 0, y: 12 }}
@@ -318,17 +315,50 @@ export default function Dashboard() {
                       </span>
                     </div>
 
-                    {/* Title & department */}
-                    <h3 className="text-base font-bold text-gray-900 leading-snug group-hover:text-blue-600 transition-colors mb-0.5">
+                    {/* Title & Metadata */}
+                    <h3 className="text-base font-bold text-gray-900 leading-snug group-hover:text-blue-600 transition-colors mb-1">
                       {job.title}
                     </h3>
-                    <p className="text-xs text-gray-400 font-medium mb-1">{job.department || 'General'}</p>
+                    <p className="text-xs text-gray-600 font-bold mb-2">
+                      {job.company || 'Hiring AI'} <span className="text-gray-300 mx-1">•</span> <span className="font-medium">{job.location || 'Remote'}</span>
+                    </p>
+                    
+                    {/* Job Type, Salary & Template Pills */}
+                    <div className="flex flex-wrap items-center gap-2 mb-4">
+                      {job.job_type && (
+                        <span className="bg-gray-100 px-2 py-0.5 rounded text-[10px] uppercase font-bold text-gray-500 tracking-wider">
+                          {job.job_type}
+                        </span>
+                      )}
+                      {job.salary && (
+                        <span className="bg-green-50 px-2 py-0.5 rounded text-[10px] uppercase font-bold text-green-700 tracking-wider">
+                          {job.salary}
+                        </span>
+                      )}
+                      {(() => {
+                        const tplMap: Record<string, { label: string; classes: string; icon: string }> = {
+                          startup:   { label: 'Startup',   icon: '🚀', classes: 'bg-orange-50 text-orange-700 border border-orange-200' },
+                          corporate: { label: 'Corporate', icon: '🏢', classes: 'bg-blue-50 text-blue-700 border border-blue-200' },
+                          fresher:   { label: 'Fresher',   icon: '🎓', classes: 'bg-purple-50 text-purple-700 border border-purple-200' },
+                        };
+                        const tpl = tplMap[job.template_type || 'startup'] || tplMap['startup'];
+                        return (
+                          <span className={`px-2 py-0.5 rounded text-[10px] font-bold tracking-wider flex items-center gap-1 ${tpl.classes}`}>
+                            {tpl.icon} {tpl.label}
+                          </span>
+                        );
+                      })()}
+                    </div>
 
-                    {/* Created date */}
-                    <p className="text-[11px] text-gray-300 font-medium mb-5">Created {createdLabel}</p>
+                    {/* Summary Preview */}
+                    {job.summary && (
+                      <p className="text-[12px] text-gray-500 leading-relaxed line-clamp-3 mb-5 border-l-2 border-blue-100 pl-3">
+                        {job.summary}
+                      </p>
+                    )}
 
-                    {/* Stats + arrow */}
-                    <div className="flex items-center justify-between pt-4 border-t border-gray-50">
+                    {/* Stats */}
+                    <div className="flex items-center justify-between pt-4 border-t border-gray-50 mb-4">
                       <div className="flex items-center gap-4">
                         <div>
                           <span className="text-lg font-black text-gray-900 tabular-nums">{job.applicants_count || 0}</span>
@@ -340,12 +370,15 @@ export default function Dashboard() {
                           <span className="block text-[10px] text-gray-400 font-bold uppercase tracking-wider">Shortlisted</span>
                         </div>
                       </div>
-                      <div className="p-2 rounded-xl bg-gray-50 group-hover:bg-blue-600 group-hover:text-white transition-all">
-                        <ChevronRight className="w-4 h-4" />
-                      </div>
                     </div>
+                    
+                    {/* View Details / Apply Button */}
+                    <div className="w-full text-center py-2.5 rounded-xl border border-blue-200 bg-blue-50 text-blue-700 font-bold text-xs group-hover:bg-blue-600 group-hover:border-blue-600 group-hover:text-white transition-all flex items-center justify-center gap-2 shadow-sm">
+                       Apply Now <ChevronRight className="w-3.5 h-3.5" />
+                    </div>
+
                     {/* Compact Tracker */}
-                    <div className="mt-5 pt-4 border-t border-gray-50">
+                    <div className="mt-4 pt-4 border-t border-gray-50">
                       <JobProgress pipelineState={job.pipeline_state || 'JD_DRAFT'} isCancelled={job.is_cancelled} compact={true} />
                     </div>
                   </motion.div>
@@ -374,9 +407,6 @@ export default function Dashboard() {
           </div>
           <span className="font-bold pr-2">Create Job</span>
         </motion.button>
-
-
-
     </>
   );
 }

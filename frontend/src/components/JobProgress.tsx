@@ -1,4 +1,4 @@
-import { CheckCircle2, Circle, Loader2, XCircle } from 'lucide-react';
+import { CheckCircle2, Circle, Loader2, XCircle, AlertCircle } from 'lucide-react';
 
 // ─── Stage definitions using exact pipeline_state enum values ───────────────
 const STAGES = [
@@ -10,18 +10,29 @@ const STAGES = [
 ];
 
 function getStageIndex(pipelineState: string): number {
-  for (let i = 0; i < STAGES.length; i++) {
-    if (STAGES[i].states.includes(pipelineState)) return i;
-  }
-  return 0;
+  const stateMap: Record<string, number> = {
+    'JD_DRAFT': 0,
+    'JD_APPROVAL_PENDING': 0,
+    'JD_APPROVED': 0,
+    'JOB_POSTED': 0,
+    'WAITING_FOR_APPLICATIONS': 1,
+    'SCREENING': 1,
+    'HR_REVIEW_PENDING': 2,
+    'INTERVIEW_SCHEDULED': 3,
+    'OFFER_SENT': 4,
+    'CLOSED': 4,
+  };
+  return stateMap[pipelineState] ?? 0;
 }
 
 export default function JobProgress({
   pipelineState,
+  status = '',
   isCancelled = false,
   compact = false,
 }: {
   pipelineState: string;
+  status?: string;
   isCancelled?: boolean;
   compact?: boolean;
 }) {
@@ -33,9 +44,10 @@ export default function JobProgress({
       <div className="flex items-center justify-between">
         {STAGES.map((stage, idx) => {
           // Stages BEFORE current: completed (blue check)
-          // Current stage: if cancelled → show red X, if error → red alert
-          // SPECIAL: If awaiting approval, we show the stage icon as "Done" (check) even if it's technically the current status mapping.
-          const isCompleted = idx < currentIdx || (idx === 0 && pipelineState === 'JD_APPROVAL_PENDING');
+          const isCompleted = idx < currentIdx;
+          const isAwaitingHR = ((idx === 0 && pipelineState === 'JD_APPROVAL_PENDING') ||
+                               (idx === 2 && pipelineState === 'HR_REVIEW_PENDING')) && status !== 'processing' && status !== 'PROCESSING';
+          
           const isCurr = idx === currentIdx && !isCompleted;
           const isPending = idx > currentIdx;
           const isCancelledHere = isCancelled && isCurr;
@@ -55,17 +67,20 @@ export default function JobProgress({
                 flex items-center justify-center rounded-full shadow-sm transition-all duration-300
                 ${compact ? 'w-5 h-5' : 'w-8 h-8'}
                 ${isCompleted ? 'bg-blue-600 text-white' : ''}
-                ${isCurr && !isCancelledHere && !isError ? 'bg-white text-blue-600 border-2 border-blue-600 shadow-[0_0_12px_rgba(37,99,235,0.25)]' : ''}
+                ${isCurr && !isCancelledHere && !isError && !isAwaitingHR ? 'bg-white text-blue-600 border-2 border-blue-600 shadow-[0_0_12px_rgba(37,99,235,0.25)]' : ''}
+                ${isAwaitingHR ? 'bg-orange-50 text-orange-600 border-2 border-orange-400 shadow-[0_0_8px_rgba(249,115,22,0.15)]' : ''}
                 ${isCancelledHere ? 'bg-red-50 text-red-500 border-2 border-red-400' : ''}
                 ${isError && isCurr ? 'bg-red-50 text-red-500 border-2 border-red-400' : ''}
-                ${isPending ? 'bg-white border-2 border-gray-200 text-gray-300' : ''}
+                ${isPending && !isAwaitingHR ? 'bg-white border-2 border-gray-200 text-gray-300' : ''}
               `}>
                 {isCompleted
                   ? <CheckCircle2 className={compact ? 'w-3 h-3' : 'w-5 h-5'} />
                   : isCancelledHere || (isError && isCurr)
                   ? <XCircle className={compact ? 'w-3 h-3' : 'w-4 h-4'} />
+                  : isAwaitingHR
+                  ? <AlertCircle className={`${compact ? 'w-3 h-3' : 'w-4 h-4'} animate-pulse`} />
                   : isCurr
-                  ? <Loader2 className={`${compact ? 'w-3 h-3' : 'w-4 h-4'} animate-spin`} />
+                  ? (status?.toUpperCase() === 'PROCESSING' ? <Loader2 className={`${compact ? 'w-3 h-3' : 'w-4 h-4'} animate-spin`} /> : <Circle className={`${compact ? 'w-2 h-2' : 'w-3 h-3'} fill-current`} />)
                   : <Circle className={`${compact ? 'w-2 h-2' : 'w-3 h-3'} fill-current opacity-30`} />
                 }
               </div>
@@ -73,11 +88,13 @@ export default function JobProgress({
               {!compact && (
                 <span className={`text-[10px] font-bold uppercase tracking-wider text-center mt-2
                   ${isCompleted ? 'text-blue-700' : ''}
-                  ${isCurr && !isCancelledHere && !isError ? 'text-slate-900' : ''}
+                  ${isCurr && !isCancelledHere && !isError && !isAwaitingHR ? 'text-slate-900' : ''}
+                  ${isAwaitingHR ? 'text-orange-700' : ''}
                   ${isCancelledHere || (isError && isCurr) ? 'text-red-500' : ''}
-                  ${isPending ? 'text-gray-400' : ''}
+                  ${isPending && !isAwaitingHR ? 'text-gray-400' : ''}
                 `}>
                   {stage.label}
+                  {isAwaitingHR && <span className="block text-[9px] text-orange-500 font-bold normal-case">Action Required</span>}
                   {isCancelledHere && <span className="block text-[9px] text-red-400 font-normal normal-case">Cancelled here</span>}
                 </span>
               )}
@@ -88,3 +105,4 @@ export default function JobProgress({
     </div>
   );
 }
+

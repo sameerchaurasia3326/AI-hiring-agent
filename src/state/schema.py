@@ -61,6 +61,13 @@ class ShortlistedCandidate(TypedDict):
     offer_sent: bool
     rejected: bool
 
+class ScoringBlueprint(TypedDict):
+    required_skills: List[str]
+    optional_skills: List[str]
+    tools: List[str]
+    domain_keywords: List[str]
+    experience_level: float
+
 
 # ─────────────────────────────────────────────────────────────
 # Main State
@@ -75,6 +82,7 @@ class HiringState(TypedDict, total=False):
     organization_id: str     # Multi-tenant isolation rule
     graph_thread_id: str     # LangGraph thread identifier
     job_title: str
+    template_type: str       # Configured JD design template variant 
     department: str
     hiring_manager_name: str
     hiring_manager_email: str
@@ -102,16 +110,16 @@ class HiringState(TypedDict, total=False):
 
     # ── Application Loop (Loop #2) ────────────────────────────
     repost_attempts: int
-    applications: Annotated[List[ApplicationRecord], operator.add]
+    applications: List[ApplicationRecord]
     applications_deadline: str    # ISO 8601 date after which we check
 
     # ── Screening ─────────────────────────────────────────────
-    scored_resumes: Annotated[List[ScoredResume], operator.add]
+    scored_resumes: List[ScoredResume]
     shortlist: List[ShortlistedCandidate]
     shortlist_sent_to_hr: bool
 
     # ── HR Selection ──────────────────────────────────────────
-    hr_selected_candidates: Annotated[List[str], operator.add]   # list of candidate_ids HR approved
+    hr_selected_candidates: List[str]   # list of candidate_ids HR approved
     hr_selection_deadline: str          # ISO 8601
 
     # ── Interview scheduling ──────────────────────────────────
@@ -121,4 +129,11 @@ class HiringState(TypedDict, total=False):
 
     # ── Pipeline metadata ─────────────────────────────────────
     pipeline_status: str                # PipelineStatus value
+    current_stage: str                  # Current node ID for validation
+    action_type: str                    # Actual action taken (jd_approve, jd_reject, etc.)
+    trace_id: str                       # UUID for distributed logging (Phase 8)
+    pipeline_version: str               # Version identifier (Phase 13)
     error_log: Annotated[List[str], operator.add]
+    force_resend: bool
+    normalized_role: str        # Standardised role token (e.g. 'security_engineer')
+    scoring_blueprint: ScoringBlueprint # Dynamic evaluation criteria

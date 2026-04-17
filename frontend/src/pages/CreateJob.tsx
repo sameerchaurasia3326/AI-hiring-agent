@@ -20,16 +20,20 @@ export default function CreateJob() {
     technical_test_link: '',
   });
 
+  // JD Template State
+  const [templates, setTemplates] = useState<{key: string, name: string, description: string}[]>([]);
+  const [selectedTemplate, setSelectedTemplate] = useState('startup');
+
   const [skills, setSkills] = useState<string[]>([]);
   const [skillInput, setSkillInput] = useState('');
 
   const [screeningQuestions, setScreeningQuestions] = useState<string[]>([]);
   const [questionInput, setQuestionInput] = useState('');
 
-  const [stages, setStages] = useState<{ stage_name: string, assigned_user_id: string }[]>([
-    { stage_name: 'Resume Screening', assigned_user_id: '' },
-    { stage_name: 'Technical Assessment', assigned_user_id: '' },
-    { stage_name: 'Final Interview', assigned_user_id: '' }
+  const [stages, setStages] = useState<{ stage_name: string, interviewer_id: string }[]>([
+    { stage_name: 'Resume Screening', interviewer_id: '' },
+    { stage_name: 'Technical Assessment', interviewer_id: '' },
+    { stage_name: 'Final Interview', interviewer_id: '' }
   ]);
   const [team, setTeam] = useState<{ id: string, name: string, email: string }[]>([]);
 
@@ -82,7 +86,16 @@ export default function CreateJob() {
         console.error("Failed to fetch team", e);
       }
     };
+    const fetchTemplates = async () => {
+      try {
+        const data = await api.getJdTemplates();
+        setTemplates(data);
+      } catch (e) {
+        console.error("Failed to fetch templates", e);
+      }
+    };
     fetchTeam();
+    fetchTemplates();
   }, []);
 
   const fetchSuggestions = async () => {
@@ -151,15 +164,17 @@ export default function CreateJob() {
       // Assemble the massive backend payload
       const payload = {
         ...formData,
+        template_type: selectedTemplate,
         hiring_manager_name: localStorage.getItem('hiring_ai_name') || 'Admin Admin',
-        hiring_manager_email: 'admin@hiring.ai',
+        hiring_manager_email: localStorage.getItem('hiring_ai_email') || '',
         required_skills: skills,
         preferred_skills: [],
         screening_questions: screeningQuestions.map(q => ({ question: q, ideal_answer: "Open", is_mandatory: true })),
         technical_test_mcq: [], // Empty, lets AI generate during pipeline processing
-        hiring_workflow: stages.map(s => ({
+        stages: stages.map((s, idx) => ({
           stage_name: s.stage_name,
-          assigned_user_id: s.assigned_user_id || null
+          stage_order: idx + 1,
+          interviewer_id: s.interviewer_id || null
         })),
         scoring_weights: { "Screening": 30, "Technical Test": 40, "Interview": 30 },
       };
@@ -352,6 +367,24 @@ export default function CreateJob() {
               <h2 className="text-lg font-bold text-gray-900 mb-4 flex items-center">
                 <ClipboardList className="w-5 h-5 mr-2 text-gray-400" /> Requirements & Process
               </h2>
+
+              {/* Template Section */}
+              <div className="mb-6">
+                <label className="block text-sm font-medium text-gray-700 mb-2">JD Generation Style (Tone & Format) *</label>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                  {templates.map(tpl => (
+                    <div 
+                      key={tpl.key} 
+                      onClick={() => setSelectedTemplate(tpl.key)}
+                      className={`p-3 border-2 rounded-xl cursor-pointer transition-all ${selectedTemplate === tpl.key ? 'border-blue-500 bg-blue-50 text-blue-900' : 'border-gray-200 hover:border-blue-200 text-gray-700 bg-gray-50 hover:bg-white'}`}
+                    >
+                      <div className="font-bold text-sm mb-0.5">{tpl.name}</div>
+                      <p className="text-[10px] opacity-70 leading-snug">{tpl.description}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
               <div className="grid grid-cols-2 gap-5 mb-5">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 mb-1">Employment Type</label>
@@ -485,10 +518,10 @@ export default function CreateJob() {
                     <div className="flex-1">
                       <label className="block text-[10px] font-bold uppercase tracking-wider text-gray-400 mb-1">Assign Interviewer</label>
                       <select
-                        value={stage.assigned_user_id}
+                        value={stage.interviewer_id}
                         onChange={(e) => {
                           const newStages = [...stages];
-                          newStages[idx].assigned_user_id = e.target.value;
+                          newStages[idx].interviewer_id = e.target.value;
                           setStages(newStages);
                         }}
                         className="w-full px-4 py-2 rounded-xl border border-gray-200 focus:ring-2 focus:ring-blue-500 outline-none bg-white"
@@ -512,7 +545,7 @@ export default function CreateJob() {
 
               <button
                 type="button"
-                onClick={() => setStages([...stages, { stage_name: '', assigned_user_id: '' }])}
+                onClick={() => setStages([...stages, { stage_name: '', interviewer_id: '' }])}
                 className="mt-4 flex items-center text-sm font-bold text-blue-600 hover:text-blue-700 transition-colors"
               >
                 <Plus className="w-4 h-4 mr-1" /> Add Custom Stage

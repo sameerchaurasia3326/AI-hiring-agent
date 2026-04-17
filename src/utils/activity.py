@@ -22,9 +22,11 @@ async def log_activity(job_id: str, message: str, type: str):
             )
             session.add(activity)
             await session.commit()
-            logger.info(f"📝 Activity Logged [{type}]: {message}")
+            # [FIX] Safe logging to avoid KeyError if message contains braces
+            logger.info("📝 Activity Logged [{}]: {}", type, message)
     except Exception as e:
-        logger.error(f"Failed to log activity: {e}")
+        logger.error("Failed to log activity: {}", e)
+        raise e
 
 def log_activity_sync(job_id: str, message: str, type: str):
     """Synchronous wrapper to call log_activity from synchronous LangGraph nodes."""

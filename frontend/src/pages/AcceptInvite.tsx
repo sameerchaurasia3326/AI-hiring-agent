@@ -1,12 +1,11 @@
 import { useState } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { Loader2, AlertCircle, CheckCircle2 } from 'lucide-react';
 import { api } from '../services/api';
 
 export default function AcceptInvite() {
   const { token } = useParams();
-  const navigate = useNavigate();
   
   const [formData, setFormData] = useState({ name: '', password: '' });
   const [error, setError] = useState('');
@@ -19,17 +18,25 @@ export default function AcceptInvite() {
     setLoading(true);
 
     try {
-      await api.acceptInvite({
+      const res = await api.acceptInvite({
         token: token || '',
         name: formData.name,
         password: formData.password
       });
+
+      if (res.access_token) {
+        localStorage.setItem('hiring_ai_token', res.access_token);
+        localStorage.setItem('hiring_ai_email', res.email);
+        localStorage.setItem('hiring_ai_role', res.role);
+        localStorage.setItem('hiring_ai_name', res.name);
+      }
+
       setSuccess(true);
       
-      // Auto redirect to login after short delay
+      // Auto redirect based on role after short delay
       setTimeout(() => {
-        navigate('/login');
-      }, 2000);
+        window.location.href = res.role === 'admin' ? '/dashboard' : '/dashboard/my-tasks';
+      }, 1500);
       
     } catch (err: any) {
       setError(err.response?.data?.detail || 'Failed to accept invitation. It may have expired.');
@@ -46,7 +53,7 @@ export default function AcceptInvite() {
             <CheckCircle2 className="h-8 w-8 text-green-600" />
           </div>
           <h3 className="text-2xl font-bold text-gray-900 mb-2">Welcome to the Team!</h3>
-          <p className="text-sm text-gray-500 mb-6">Your account is ready. Redirecting to login...</p>
+          <p className="text-sm text-gray-500 mb-6">Your account is ready. Redirecting to your dashboard...</p>
           <Loader2 className="w-6 h-6 animate-spin text-blue-600 mx-auto" />
         </motion.div>
       </div>

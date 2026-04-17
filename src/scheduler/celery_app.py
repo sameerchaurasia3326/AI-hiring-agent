@@ -26,5 +26,14 @@ celery_app.conf.update(
     task_acks_late=True,
     task_reject_on_worker_lost=True,
     # Beat schedule (optional periodic checks)
-    beat_schedule={},
+    beat_schedule={
+        "refresh_expiring_linkedin_tokens": {
+            "task": "tasks.refresh_expiring_linkedin_tokens",
+            "schedule": 7200.0,  # Run every 2 hours
+        },
+        "process_outbox_queue": {
+            "task": "tasks.process_outbox_queue",
+            "schedule": 60.0,    # Run every 60 seconds
+        },
+    },
 )

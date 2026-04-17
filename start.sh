@@ -11,6 +11,9 @@
 set -e
 cd "$(dirname "$0")"
 
+# ── [NEW] Step 2 & 3: DevOps Paths ───────────────────────────
+DOCKER_PATH="/usr/local/bin/docker"
+
 if [ -f ".venv/bin/activate" ]; then
     echo "🐍 Activating Python virtual environment..."
     source .venv/bin/activate
@@ -24,10 +27,24 @@ echo "🧹 Stopping any existing processes..."
 pkill -f "uvicorn src.api.main" 2>/dev/null || true
 pkill -f "celery -A src.scheduler.celery_app" 2>/dev/null || true
 pkill -f "vite" 2>/dev/null || true
+lsof -ti :5173 | xargs kill -9 2>/dev/null || true
+lsof -ti :5174 | xargs kill -9 2>/dev/null || true
 sleep 1
 
 # ── Clear old log ────────────────────────────────────────────
 > "$LOG"
+
+# ── [NEW] Step 5 & 6: Ensure Postgres Starts & Wait Loops ─────
+echo "🔍 Checking PostgreSQL..."
+# Try to start container if not running
+$DOCKER_PATH start hiring_postgres >> "$LOG" 2>&1 || true
+
+echo "⏳ Waiting for Postgres to accept connections on port 5432..."
+until nc -z localhost 5432; do
+    echo "   ...Waiting for Postgres..."
+    sleep 2
+done
+echo "✅ PostgreSQL is ready!"
 
 # ── Start API server ─────────────────────────────────────────
 echo "🚀 Starting API server on http://localhost:8000 ..."
@@ -39,7 +56,7 @@ API_PID=$!
 # ── Start Celery worker ──────────────────────────────────────
 echo "⚙️  Starting Celery worker..."
 PYTHONPATH=. .venv/bin/python -m celery \
-  -A src.scheduler.celery_app worker \
+  -A src.scheduler.celery_app worker -B \
   --loglevel=info \
   >> "$LOG" 2>&1 &
 CELERY_PID=$!

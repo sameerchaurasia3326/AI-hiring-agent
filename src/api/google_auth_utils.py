@@ -2,6 +2,7 @@ import os
 import secrets
 import hashlib
 import base64
+import asyncio
 from google_auth_oauthlib.flow import Flow
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
@@ -102,7 +103,9 @@ async def exchange_code_for_tokens(code: str, state: str):
     code_verifier = payload.get("cv", "")  # Required for PKCE
 
     flow = _build_flow(state=state)
-    flow.fetch_token(code=code, code_verifier=code_verifier)
+    
+    # [FIX] Wrap synchronous blocking call in a thread to prevent FastAPI event loop stall
+    await asyncio.to_thread(flow.fetch_token, code=code, code_verifier=code_verifier)
 
     return user_id, flow.credentials
 

@@ -21,6 +21,8 @@ export default function Team() {
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
 
   const currentEmail = localStorage.getItem('hiring_ai_email');
+  const userRole = localStorage.getItem('hiring_ai_role');
+  const isAdmin = userRole === 'admin';
 
   useEffect(() => {
     fetchTeam();
@@ -96,12 +98,14 @@ export default function Team() {
           </h1>
           <p className="text-gray-500 mt-1">Manage your interviewers and check their calendar availability.</p>
         </div>
-        <button 
-          onClick={() => setShowInviteModal(true)}
-          className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-3 rounded-xl font-bold shadow-lg shadow-blue-600/20 active:scale-95 transition-all flex items-center gap-2"
-        >
-          <UserPlus className="w-5 h-5" /> Invite Team Member
-        </button>
+        {isAdmin && (
+          <button 
+            onClick={() => setShowInviteModal(true)}
+            className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-3 rounded-xl font-bold shadow-lg shadow-blue-600/20 active:scale-95 transition-all flex items-center gap-2"
+          >
+            <UserPlus className="w-5 h-5" /> Invite Team Member
+          </button>
+        )}
       </div>
 
       <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
@@ -130,7 +134,7 @@ export default function Team() {
                 <th className="px-6 py-4">Role</th>
                 <th className="px-6 py-4">Calendar Connection</th>
                 <th className="px-6 py-4">Status</th>
-                <th className="px-6 py-4">Actions</th>
+                {isAdmin && <th className="px-6 py-4">Actions</th>}
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-50">
@@ -194,17 +198,19 @@ export default function Team() {
                       <span className="w-2 h-2 rounded-full bg-green-500 inline-block mr-2 ring-4 ring-green-100 animate-pulse" />
                       <span className="text-sm font-semibold text-gray-700">Active</span>
                     </td>
-                    <td className="px-6 py-4">
-                      {member.email !== currentEmail && (
-                        <button 
-                          onClick={() => handleRemove(member)}
-                          className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all"
-                          title="Remove from team"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      )}
-                    </td>
+                    {isAdmin && (
+                      <td className="px-6 py-4">
+                        {member.email !== currentEmail && (
+                          <button 
+                            onClick={() => handleRemove(member)}
+                            className="p-2 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all"
+                            title="Remove from team"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        )}
+                      </td>
+                    )}
                   </tr>
                 ))
               )}

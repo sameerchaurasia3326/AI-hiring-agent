@@ -48,7 +48,14 @@ Generate a technical MCQ assessment for this role.
 """
 
 async def generate_tests(state: HiringState) -> dict:
-    """Generate MCQ technical tests if requested."""
+    """Generate MCQ technical assessment based on the JD."""
+    if not state.get("job_id"):
+        raise Exception("CRITICAL: Missing job_id in generate_tests")
+
+    logger.info("STAGE: generate_tests")
+    logger.info("ACTION: {}", state.get("action_type"))
+    logger.info("JOB_ID: {}", state.get("job_id"))
+
     job_id = state.get("job_id")
     test_type = state.get("technical_test_type", "none")
     jd_draft = state.get("jd_draft", "")
@@ -69,10 +76,11 @@ async def generate_tests(state: HiringState) -> dict:
     chain = prompt | llm.with_structured_output(MCQList)
 
     try:
+        # [NEW] Explicit config to avoid 'get_config' outside runnable context
         result: MCQList = await chain.ainvoke({
             "job_title": job_title,
             "jd_draft": jd_draft
-        })
+        }, config={"callbacks": []})
         
         questions_data = [q.model_dump() for q in result.questions]
         logger.success("✅ [generate_tests] Generated {} questions", len(questions_data))

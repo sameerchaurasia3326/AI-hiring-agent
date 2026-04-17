@@ -21,15 +21,12 @@ Tools defined here:
 from __future__ import annotations
 
 import asyncio
-import smtplib
 import uuid
 from datetime import datetime, timezone, timedelta
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
 from pathlib import Path
 from typing import List, Optional
 
-from langchain_core.tools import tool
+from langchain_core.tools import tool, Tool
 from loguru import logger
 
 from src.config import settings
@@ -38,58 +35,35 @@ from src.config import settings
 # ═══════════════════════════════════════════════════════════════════════════════
 # EMAIL TOOLS
 # ═══════════════════════════════════════════════════════════════════════════════
-
-def _smtp_send(to: str, subject: str, body: str, html: bool = False) -> str:
-    """Internal email dispatch — supports SMTP and SendGrid."""
+async def _dispatch_pure_email(to: str, subject: str, body: str, html: bool = False) -> str:
+    """
+    Step 9: Internal dispatch for tools using the pure email system.
+    """
+    from src.utils.email_utils import send_any_email
+    from src.utils.config_builder import build_email_config
     
-    # ── Choice 1: Resend ────────────────────────────────────
-    if settings.email_backend == "resend":
-        try:
-            import resend
-            resend.api_key = settings.resend_api_key
-            
-            params = {
-                "from": settings.from_email,
-                "to": to,
-                "subject": subject,
-                "text": body if not html else None,
-                "html": body if html else None,
-            }
-            resend.Emails.send(params)
-            logger.success("🚀 [RESEND] Email sent → {}: {}", to, subject)
-            return f"Resend email sent to {to}"
-        except Exception as e:
-            logger.error("❌ Resend failed to {}: {}", to, e)
-            return f"ERROR: Resend failed: {e}"
-
-    # ── Choice 2: Console (for testing/dev) ─────────────────
-    if settings.email_backend == "console":
-        logger.warning("📺 [CONSOLE EMAIL] To: {} | Subject: {}", to, subject)
-        logger.info("\n---\n{}\n---", body)
-        return f"Email logged to console for {to}"
-
-    # ── Choice 3: Standard SMTP ──────────────────────────────
-    msg = MIMEMultipart("alternative")
-    msg["From"]    = settings.from_email
-    msg["To"]      = to
-    msg["Subject"] = subject
-    msg.attach(MIMEText(body, "html" if html else "plain", "utf-8"))
-
     try:
-        with smtplib.SMTP(settings.smtp_host, settings.smtp_port) as srv:
-            srv.ehlo()
-            srv.starttls()
-            srv.login(settings.smtp_user, settings.smtp_password)
-            srv.sendmail(settings.from_email, [to], msg.as_string())
-        logger.success("📧 [SMTP] Email sent → {}: {}", to, subject)
-        return f"Email sent to {to}"
+        email_config = build_email_config(settings)
+        # Default tools to 'resend' with SMTP fallback as per general policy
+        success = await send_any_email(
+            to=to,
+            subject=subject,
+            html=body,
+            provider="resend",
+            config=email_config,
+            fallback=True
+        )
+        if success:
+            return f"Email sent to {to}"
+        return f"ERROR: All email providers failed for {to}"
     except Exception as e:
-        logger.error("❌ SMTP failed to {}: {}", to, e)
-        return f"ERROR: SMTP failed: {e}"
+        logger.error(f"❌ Email dispatch error for {to}: {e}")
+        return f"ERROR: {e}"
+
 
 
 @tool
-def send_email_tool(to: str, subject: str, body: str) -> str:
+async def send_email_tool(to: str, subject: str, body: str) -> str:
     """Send a plain-text email to any recipient.
 
     Args:
@@ -99,25 +73,24 @@ def send_email_tool(to: str, subject: str, body: str) -> str:
     Returns:
         Confirmation string.
     """
-    return _smtp_send(to, subject, body, html=False)
+    return await _dispatch_pure_email(to, subject, body, html=False)
+
+
+from src.nodes.shortlist_sender import send_shortlist_to_hr
+
+send_hr_notification_tool = Tool(
+    name="send_hr_notification",
+    func=send_shortlist_to_hr,
+    description="Send shortlisted candidates to HR"
+)
+
+print("DEBUG TOOL:", send_hr_notification_tool)
+print("DEBUG FUNC:", send_hr_notification_tool.func)
+print("IS CALLABLE:", callable(send_hr_notification_tool.func))
 
 
 @tool
-def send_hr_notification_tool(hr_email: str, subject: str, html_body: str) -> str:
-    """Send an HTML-formatted notification email to the HR/hiring manager.
-
-    Args:
-        hr_email: Hiring manager's email address.
-        subject: Email subject.
-        html_body: HTML content of the notification.
-    Returns:
-        Confirmation string.
-    """
-    return _smtp_send(hr_email, subject, html_body, html=True)
-
-
-@tool
-def send_offer_letter_tool(
+async def send_offer_letter_tool(
     candidate_email: str,
     candidate_name: str,
     job_title: str,
@@ -148,11 +121,11 @@ Please review the formal offer documents and respond within 5 business days to c
 
 With warm regards,
 The Hiring Team"""
-    return _smtp_send(candidate_email, f"Offer Letter — {job_title}", body)
+    return await _dispatch_pure_email(candidate_email, f"Offer Letter — {job_title}", body)
 
 
 @tool
-def send_rejection_email_tool(
+async def send_rejection_email_tool(
     candidate_email: str,
     candidate_name: str,
     job_title: str,
@@ -178,11 +151,11 @@ We appreciate your time and effort and wish you success in your job search.
 
 Best regards,
 {company_name}"""
-    return _smtp_send(candidate_email, "Update on your application", body)
+    return await _dispatch_pure_email(candidate_email, "Update on your application", body)
 
 
 @tool
-def send_shortlist_email_tool(
+async def send_shortlist_email_tool(
     hr_email: str,
     job_title: str,
     job_id: str,
@@ -200,38 +173,88 @@ def send_shortlist_email_tool(
     """
     import json
     candidates = json.loads(candidates_json)
-    rows = ""
+    
+    # ── [PREMIUM DESIGN] Card-based Email Template ──────────────────────────
+    candidate_cards = ""
     for c in candidates:
         select_url = f"http://localhost:8000/jobs/{job_id}/select-candidates?selected_ids={c['candidate_id']}"
-        rows += f"""
-        <tr>
-          <td>{c['name']}</td>
-          <td>{c['email']}</td>
-          <td><b>{c['score']:.1f}/100</b></td>
-          <td><a href="{select_url}" style="background:#10b981; color:white; padding:5px 10px; text-decoration:none; border-radius:3px; font-weight:bold;">Select for Interview</a></td>
-        </tr>
+        score_color = "#10b981" if c['score'] >= 80 else "#f59e0b" if c['score'] >= 60 else "#ef4444"
+        
+        candidate_cards += f"""
+        <div style="background: #ffffff; border-radius: 12px; padding: 24px; margin-bottom: 20px; border: 1px solid #e5e7eb; box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);">
+            <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 16px;">
+                <div style="flex: 1;">
+                    <h3 style="margin: 0 0 4px 0; color: #111827; font-size: 18px; font-weight: 700;">{c['name']}</h3>
+                    <p style="margin: 0; color: #6b7280; font-size: 14px;">{c['email']}</p>
+                </div>
+                <div style="background: {score_color}; color: white; padding: 6px 12px; border-radius: 9999px; font-size: 14px; font-weight: 600; white-space: nowrap;">
+                    Score: {c['score']:.1f}/100
+                </div>
+            </div>
+            <div style="border-top: 1px solid #f3f4f6; padding-top: 16px; margin-top: 16px; display: flex; gap: 12px;">
+                <a href="{select_url}" style="background: #2563eb; color: #ffffff; padding: 10px 20px; text-decoration: none; border-radius: 8px; font-size: 14px; font-weight: 600; display: inline-block; transition: background 0.2s;">
+                    Select for Interview
+                </a>
+                <a href="http://localhost:5173/candidates/{c['candidate_id']}" style="background: #f3f4f6; color: #374151; padding: 10px 20px; text-decoration: none; border-radius: 8px; font-size: 14px; font-weight: 600; display: inline-block;">
+                    View Profile
+                </a>
+            </div>
+        </div>
         """
 
     html = f"""
-<h2>🤖 AI Candidate Shortlist — {job_title}</h2>
-<p>The AI has ranked the top {len(candidates)} candidate(s). Please click <b>'Select for Interview'</b> next to any candidate you wish to proceed with.</p>
-<table border="1" cellpadding="8" cellspacing="0">
-  <tr style="background:#f0f0f0"><th>Name</th><th>Email</th><th>AI Score</th><th>Action</th></tr>
-{rows}
-</table>
-<br>
-<p><i>Note: Selection links will expire in 2 days.</i></p>
-"""
-    return _smtp_send(hr_email, f"[Hiring AI] Shortlist Ready — {job_title}", html, html=True)
+    <!DOCTYPE html>
+    <html>
+    <body style="margin: 0; padding: 0; background-color: #f9fafb; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;">
+        <div style="max-width: 600px; margin: 0 auto; background-color: #ffffff;">
+            <!-- Header -->
+            <div style="background: linear-gradient(135deg, #1e3a8a 0%, #3b82f6 100%); padding: 40px 32px; text-align: center;">
+                <div style="display: inline-block; background: rgba(255, 255, 255, 0.1); padding: 8px 16px; border-radius: 8px; color: #ffffff; font-size: 12px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 16px;">
+                    🤖 AI Hiring Intelligence
+                </div>
+                <h1 style="margin: 0; color: #ffffff; font-size: 28px; font-weight: 800; letter-spacing: -0.025em;">
+                    Candidate Shortlist Ready
+                </h1>
+                <p style="margin: 8px 0 0 0; color: #dbeafe; font-size: 16px;">
+                    {job_title}
+                </p>
+            </div>
+
+            <!-- Content -->
+            <div style="padding: 32px; background-color: #f9fafb;">
+                <p style="margin: 0 0 24px 0; color: #4b5563; font-size: 16px; line-height: 1.5;">
+                    The AI agent has analyzed all applicants and identified the top {len(candidates)} high-potential candidates for your review.
+                </p>
+                
+                {candidate_cards}
+
+                <div style="margin-top: 32px; padding: 20px; background: #eff6ff; border-radius: 12px; border: 1px solid #bfdbfe;">
+                    <p style="margin: 0; color: #1e40af; font-size: 14px; line-height: 1.5;">
+                        <strong>Next Steps:</strong> Please review the candidates and click the selection buttons to move them to the interview stage. Links remain active for 48 hours.
+                    </p>
+                </div>
+            </div>
+
+            <!-- Footer -->
+            <div style="padding: 32px; text-align: center; border-top: 1px solid #e5e7eb;">
+                <p style="margin: 0; color: #9ca3af; font-size: 12px;">
+                    © 2024 Hiring AI Platform. Powered by Advanced Agentic Intelligence.
+                </p>
+            </div>
+        </div>
+    </body>
+    </html>
+    """
+    return await _smtp_send(hr_email, f"[Hiring AI] {len(candidates)} Candidates Shortlisted for {job_title}", html, html=True)
 
 
-def send_email(to: str, subject: str, body: str, html: bool = False) -> str:
+async def send_email(to: str, subject: str, body: str, html: bool = False) -> str:
     """Public utility for sending emails across the system.
     
     This function is intended for internal use by nodes and API endpoints. 
     For LLM tool calling, use send_email_tool.
     """
-    return _smtp_send(to, subject, body, html)
+    return await _smtp_send(to, subject, body, html)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -416,6 +439,14 @@ async def book_interview_tool(
                 "📅 [MOCK CALENDAR] Booked interview for {} at {} | ID: {} | Meet: {}",
                 candidate_name, slot_start, mock_id, mock_link,
             )
+            
+            # [NEW] Send confirmation email even for mock scheduling so user sees it
+            await _smtp_send(
+                to=candidate_email,
+                subject=f"Interview Scheduled: {job_title}",
+                body=f"Hi {candidate_name},\n\nYour interview for {job_title} has been scheduled.\n\nDate/Time: {slot_start}\nLink: {mock_link}\n\nBest regards,\nThe Hiring Team"
+            )
+            
             return json.dumps({"event_id": mock_id, "meet_link": mock_link})
 
         # Build attendees list — always include candidate; add interviewer if provided
@@ -480,25 +511,28 @@ def parse_resume_tool(resume_path: str) -> str:
         Extracted plain text content (max 6000 chars).
     """
     p = Path(resume_path)
-    if p.suffix.lower() == ".pdf":
+    suffix = p.suffix.lower()
+    if suffix == ".pdf":
         try:
             from pypdf import PdfReader
             text = "\n".join(pg.extract_text() or "" for pg in PdfReader(str(p)).pages)
             return text[:6000]
         except Exception as e:
             return f"ERROR: PDF parse failed: {e}"
-    elif p.suffix.lower() in {".docx", ".doc"}:
+    elif suffix in {".docx", ".doc"}:
         try:
             from docx import Document
             return "\n".join(para.text for para in Document(str(p)).paragraphs)[:6000]
         except Exception as e:
             return f"ERROR: DOCX parse failed: {e}"
-    elif p.suffix.lower() == ".txt":
+    elif suffix == ".txt":
         try:
             return p.read_text(encoding="utf-8")[:6000]
         except Exception as e:
             return f"ERROR: TXT parse failed: {e}"
-    return "ERROR: Unsupported file type"
+            
+    logger.warning("❌ [parse_resume_tool] Unsupported file: path={} | suffix={}", resume_path, suffix)
+    return f"ERROR: Unsupported file type (suffix: {suffix})"
 
 
 @tool

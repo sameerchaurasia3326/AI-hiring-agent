@@ -5,6 +5,12 @@ Authentication and Security Utilities.
 Provides password hashing via bcrypt to ensure zero plain-text storage.
 """
 import bcrypt
+import uuid
+from typing import Dict, Any, Optional
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+from src.db.database import get_db
+from src.db.models import User
 
 def hash_password(password: str) -> str:
     """Hash a plain text password using bcrypt."""
@@ -53,42 +59,69 @@ from fastapi.security import OAuth2PasswordBearer
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login", auto_error=False)
 
-def get_current_user(request: Request) -> dict:
-    """
-    FastAPI dependency to extract JWT token from Authorization header OR ?token= query parameter.
-    """
-    # 1. Try Header
+async def get_current_user(request: Request, db: AsyncSession = Depends(get_db)) -> User:
+    """Dependency: Extract JWT and strictly resolve User ID from database."""
+    # 1. Extract Token
     auth_header = request.headers.get("Authorization")
     token = None
     if auth_header and auth_header.startswith("Bearer "):
         token = auth_header.split(" ")[1]
     
-    # 2. Try Query Param (for email clicks)
     if not token:
         token = request.query_params.get("token")
         
     if not token:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Not authenticated",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    
+    # 2. Decode Token
     payload = decode_token(token)
-    if not payload:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Could not validate credentials",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    return payload
+    if not payload or "user_id" not in payload:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    # 3. Resolve actual user record from DB
+    user_id = payload["user_id"]
+    from sqlalchemy import select
+    stmt = select(User).where(User.id == uuid.UUID(user_id))
+    result = await db.execute(stmt)
+    user = result.scalar_one_or_none()
+    
+    if not user:
+        raise HTTPException(status_code=401, detail="User not found")
+        
+    return user
 
 
-def require_admin(current_user: dict = Depends(get_current_user)) -> dict:
+async def get_current_user_optional(request: Request, db: AsyncSession = Depends(get_db)) -> Optional[User]:
+    """
+    Like get_current_user but returns None instead of raising 401.
+    Used for endpoints that should work both authenticated (frontend)
+    and unauthenticated (email link clicks).
+    """
+    try:
+        return await get_current_user(request, db)
+    except HTTPException:
+        return None
+
+
+async def authenticate_websocket(token: str, db: AsyncSession) -> Optional[User]:
+    """Helper for WebSocket auth as headers are not easily available in JS WebSocket API."""
+    try:
+        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+        user_id: str = payload.get("user_id") # Consistent with other endpoints
+        if user_id is None:
+            return None
+            
+        from src.db.models import User as UserDB
+        stmt = select(UserDB).where(UserDB.id == uuid.UUID(user_id))
+        result = await db.execute(stmt)
+        return result.scalar_one_or_none()
+    except JWTError:
+        return None
+async def require_admin(current_user: User = Depends(get_current_user)) -> User:
     """
     FastAPI dependency: blocks access unless user role is 'admin'.
-    Use on endpoints like POST /jobs, POST /invite-user.
     """
-    if current_user.get("role") != "admin":
+    if current_user.role != "admin":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Access denied: admin role required"
@@ -96,13 +129,12 @@ def require_admin(current_user: dict = Depends(get_current_user)) -> dict:
     return current_user
 
 
-def require_interviewer_or_above(current_user: dict = Depends(get_current_user)) -> dict:
+def require_interviewer_or_above(current_user: User = Depends(get_current_user)) -> User:
     """
-    FastAPI dependency: allows admin, hiring_manager, and interviewer roles.
-    Blocks any unknown or unauthenticated user.
+    FastAPI dependency: allows admin and interviewer roles.
     """
-    allowed = {"admin", "hiring_manager", "interviewer"}
-    if current_user.get("role") not in allowed:
+    allowed = {"admin", "interviewer"}
+    if current_user.role not in allowed:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Access denied: insufficient role"

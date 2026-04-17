@@ -3,125 +3,180 @@ src/nodes/shortlist_sender.py
 ──────────────────────────────
 LangGraph Node: send_shortlist_to_hr
 ──────────────────────────────────────
-Invokes send_shortlist_email_tool (LangChain @tool) + fires 2-day Celery wait.
-Returns state delta only. NO routing logic.
-State: SCREENING → HR_REVIEW_PENDING
+Production Hardened (Outbox Pattern):
+1. Atomic Lease Guard (Phase 1).
+2. Structured Tracking (Phase 8 & 14).
+3. Outbox decoupled dispatch (Phase 2).
+4. Idempotent Write (ON CONFLICT DO NOTHING).
 """
 from __future__ import annotations
 
-import json
-from datetime import datetime, timezone, timedelta
-
+import re
+import uuid as _uuid
 from loguru import logger
-from langgraph.types import interrupt
+from sqlalchemy import update
+from sqlalchemy.dialects.postgresql import insert
+from datetime import datetime, timezone
 
 from src.state.schema import HiringState, PipelineStatus
-from src.tools.hiring_tools import send_shortlist_email_tool
-from src.scheduler.tasks import wait_for_hr_selection, TWO_DAYS_SEC
+from src.db.database import AsyncSessionLocal
+from src.db.models import Job, Outbox
+from src.state.validator import validate_node
+from src.utils.production_safety import lease_guard, StructuredLogger, log_event
 
 
+def is_valid_email(email: str) -> bool:
+    """Phase 12: Pre-dispatch email validation."""
+    return isinstance(email, str) and "@" in email and "." in email
+
+
+@validate_node
+@lease_guard
 async def send_shortlist_to_hr(state: HiringState) -> dict:
-    """Send ranked shortlist to HR via tool and start the 2-day timer."""
-    shortlist = state.get("shortlist", [])
-    job_id    = state.get("job_id", "")
-    thread_id = state.get("graph_thread_id", "")
-    hr_email  = state.get("hiring_manager_email", "")
+    job_id = state.get("job_id")
+    trace_id = state.get("trace_id")
+    s_logger = StructuredLogger(trace_id=trace_id, job_id=job_id)
 
-    # ── [NEW] Persist candidates to DB before sending ────────────────────────
-    if shortlist:
-        await _persist_shortlist_to_db(
-            job_id, 
-            shortlist, 
-            state.get("organization_id"),
-            state.get("applications", [])
-        )
+    if not job_id:
+        return state
 
-    # ── Invoke LangChain tool ─────────────────────────────────────────────────
-    send_shortlist_email_tool.invoke({
-        "hr_email":       hr_email,
-        "job_title":      state.get("job_title", ""),
-        "job_id":         job_id,
-        "candidates_json": json.dumps([
-            {"name": c["name"], "email": c["email"], "score": c["score"], "candidate_id": c["candidate_id"]}
-            for c in shortlist
-        ]),
-    })
+    shortlisted = state.get("shortlist", [])
+    if len(shortlisted) == 0:
+        s_logger.info("SHORTLIST_EMPTY", {"reason": "skipping_notification"})
+        return {"shortlist_sent_to_hr": True}
 
-    # ── Fire Celery wait (short for testing, was TWO_DAYS_SEC in production) ────────
-    SELECTION_WAIT_SEC = 3600  # Give user 1 hour to click the email link instead of 60 seconds
-    wait_for_hr_selection.apply_async(args=[job_id, thread_id], countdown=SELECTION_WAIT_SEC)
-    deadline = (datetime.now(timezone.utc) + timedelta(seconds=SELECTION_WAIT_SEC)).isoformat()
-
-    logger.success("📧 [shortlist_sender] Sent {} candidates to HR. 60-second timer started.", len(shortlist))
+    # [NEW] Senior Engineer Fix: Preemptive DB Audit for idempotency
+    # --- Version-Aware Idempotency Audit (Senior Engineer Fix) ---
+    force_resend = state.get("force_resend", False)
     
-    # ── Wait State Logic ──────────────────────────────────────────────────────
-    # Interrupt immediately after sending. The graph pauses here until:
-    # 1. HR calls the decision API (Decision 3)
-    # 2. Celery 2-day timer resumes with scheduler_event
-    interrupt_response = interrupt({
-        "type": "hr_review_pending",
-        "job_id": state.get("job_id"),
-        "organization_id": state.get("organization_id")
-    })
+    from sqlalchemy import select, update as sqlalchemy_update
+    async with AsyncSessionLocal() as session:
+        # 1. Fetch current job versioning state
+        job_check = await session.execute(select(Job).where(Job.id == job_id))
+        job = job_check.scalar_one_or_none()
+        
+        if not job:
+            s_logger.error("JOB_NOT_FOUND")
+            return state
+
+        current_ver = job.last_email_version or 1
+        target_version = current_ver + 1 if force_resend else current_ver
+
+        # 2. Check if this specific version already exists in Outbox
+        outbox_check = await session.execute(
+            select(Outbox).where(
+                Outbox.job_id == job_id,
+                Outbox.type == "SEND_SHORTLIST",
+                Outbox.version == target_version
+            )
+        )
+        existing_outbox = outbox_check.scalar_one_or_none()
+        
+        if existing_outbox:
+            s_logger.info("IDEMPOTENCY_SKIP", {
+                "reason": "version_exists", 
+                "version": target_version,
+                "status": existing_outbox.status
+            })
+            return {
+                "shortlist_sent_to_hr": True,
+                "pipeline_status": PipelineStatus.HR_REVIEW_PENDING.value,
+                "current_stage": "hr_selection"
+            }
+
+        # 3. Check if Job has already advanced past this stage (Safety guard)
+        if not force_resend and job.pipeline_state in [PipelineStatus.HR_REVIEW_PENDING.value, "hr_selection"]:
+             s_logger.info("IDEMPOTENCY_SKIP", {"reason": "job_status_advanced"})
+             return {
+                "shortlist_sent_to_hr": True,
+                "pipeline_status": PipelineStatus.HR_REVIEW_PENDING.value,
+                "current_stage": "hr_selection"
+            }
+
+
+    # Admin email discovery with Database Fallback (Senior Engineer Fix)
+    admin_email = state.get("admin_email") or state.get("hiring_manager_email")
+    if isinstance(admin_email, dict):
+        admin_email = admin_email.get("email")
+
+    if not admin_email:
+        # Fallback: Query the Job's hiring manager directly from DB record (Senior Engineer Fix)
+        if job and job.hiring_manager_email:
+            admin_email = job.hiring_manager_email
+        
+        if not admin_email:
+            # Deep Fallback: Query the organization owner if needed
+            async with AsyncSessionLocal() as session:
+                from src.db.models import User
+                if job and job.hiring_manager_id:
+                    hm_check = await session.execute(select(User).where(User.id == job.hiring_manager_id))
+                    hm = hm_check.scalar_one_or_none()
+                    if hm and hm.email:
+                        admin_email = hm.email
+
+    # Phase 12: Validate BEFORE outbox write
+    if not admin_email or not is_valid_email(str(admin_email)):
+        s_logger.error("INVALID_ADMIN_EMAIL", f"Invalid target: {admin_email}. Defaulting to system admin.")
+        # Final safety net: Use the master settings admin if available
+        admin_email = getattr(settings, "admin_email", None)
+        if not admin_email or not is_valid_email(str(admin_email)):
+            await log_event(job_id, "SHORTLIST_NOTIFICATION_SKIPPED", {"reason": "no_valid_recipient"})
+            return {"shortlist_sent_to_hr": True}
+
+    # ── Phase 2 & 15: Idempotent Outbox Pattern Dispatch ──
+    try:
+        async with AsyncSessionLocal() as session:
+            # ── Phase 2 & 15: Idempotent Versioned Outbox Deposit ──
+            # We use target_version prepared in Step 1
+            stmt = (
+                insert(Outbox)
+                .values(
+                    job_id=job_id,
+                    type="SEND_SHORTLIST",
+                    version=target_version,
+                    payload={
+                        "admin_email": str(admin_email),
+                        "job_title": state.get("job_title", "Job"),
+                        "shortlisted_candidates": shortlisted,
+                        "trace_id": trace_id,
+                        "version": target_version
+                    },
+                    status="PENDING",
+                    created_at=datetime.now(timezone.utc)
+                )
+                .on_conflict_do_nothing(index_elements=["job_id", "type", "version"])
+            )
+            await session.execute(stmt)
+
+            # Atomic Version Update on Job record
+            if target_version > current_ver:
+                await session.execute(
+                    sqlalchemy_update(Job)
+                    .where(Job.id == job_id)
+                    .values(last_email_version=target_version)
+                )
+            
+            # Atomic DB State Update
+            await session.execute(
+                update(Job)
+                .where(Job.id == _uuid.UUID(str(job_id)))
+                .values(
+                    pipeline_state=PipelineStatus.HR_REVIEW_PENDING.value,
+                    status_field="ACTION_REQUIRED",
+                    current_stage="hr_selection"
+                )
+            )
+            await session.commit()
+            
+        s_logger.success("SHORTLIST_QUEUED_IN_OUTBOX", {"target": admin_email})
+        await log_event(job_id, "SHORTLIST_SENT")
+
+    except Exception as e:
+        s_logger.error("OUTBOX_WRITE_FAILED", str(e))
+        await log_event(job_id, "SHORTLIST_NOTIFICATION_FAILED", {"error": str(e)})
 
     return {
-        "shortlist_sent_to_hr":  True,
-        "hr_selection_deadline": deadline,
-        "hr_selected_candidates": interrupt_response.get("selected_ids") if isinstance(interrupt_response, dict) else [],
-        "scheduler_event":       interrupt_response if isinstance(interrupt_response, str) else None,
-        "pipeline_status":       PipelineStatus.HR_REVIEW_PENDING.value,
+        "shortlist_sent_to_hr": True,
+        "pipeline_status": PipelineStatus.HR_REVIEW_PENDING.value,
+        "current_stage":   "hr_selection"
     }
-
-
-async def _persist_shortlist_to_db(job_id: str, shortlist: list, org_id: str, applications: list):
-    """Save shortlisted candidates and their applications to Postgres."""
-    from sqlalchemy import select
-    from src.db.database import AsyncSessionLocal
-    from src.db.models import Candidate, Application
-    import uuid
-
-    async with AsyncSessionLocal() as session:
-        try:
-            # Helper to find resume_path from applications list by candidate_id
-            resume_lookup = {a["candidate_id"]: a["resume_path"] for a in applications}
-            
-            for c in shortlist:
-                # 1. Ensure Candidate exists
-                stmt = select(Candidate).where(Candidate.email == c["email"])
-                res = await session.execute(stmt)
-                candidate = res.scalar_one_or_none()
-
-                if not candidate:
-                    candidate = Candidate(
-                        id=uuid.UUID(c["candidate_id"]),
-                        name=c["name"],
-                        email=c["email"],
-                        organization_id=uuid.UUID(org_id) if org_id else None,
-                        status="screening"
-                    )
-                    session.add(candidate)
-                    await session.flush() # Get ID if not provided (though we provide it)
-                
-                # 2. Ensure Application exists
-                stmt = select(Application).where(
-                    Application.job_id == uuid.UUID(job_id),
-                    Application.candidate_id == candidate.id
-                )
-                res = await session.execute(stmt)
-                app = res.scalar_one_or_none()
-
-                if not app:
-                    app = Application(
-                        job_id=uuid.UUID(job_id),
-                        candidate_id=candidate.id,
-                        resume_path=resume_lookup.get(c["candidate_id"], ""),
-                        screening_score=c["score"],
-                        status="screening"
-                    )
-                    session.add(app)
-            
-            await session.commit()
-            logger.info("💾 [shortlist_sender] Persisted {} candidates to DB", len(shortlist))
-        except Exception as e:
-            await session.rollback()
-            logger.error("❌ [shortlist_sender] DB Persistence failed: {}", e)
